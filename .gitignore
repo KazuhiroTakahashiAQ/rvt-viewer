@@ -1,0 +1,7 @@
+node_modules/
+dist/
+src/wasm/pkg/
+test-results/
+playwright-report/
+*.log
+.DS_Store

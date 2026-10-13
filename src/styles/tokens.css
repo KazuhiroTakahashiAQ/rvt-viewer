@@ -1,0 +1,82 @@
+:root {
+  color-scheme: light;
+  --font-ui: system-ui, -apple-system, 'Segoe UI', 'Yu Gothic UI', 'Meiryo UI', 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+  --fs: 12px;
+  --fs-small: 11px;
+
+  --bg-app: #e6e8eb;
+  --bg-titlebar: #2c333c;
+  --fg-titlebar: #e8ebef;
+  --bg-ribbon-tabs: #e2e5e9;
+  --bg-ribbon: #f7f8f9;
+  --bg-ribbon-panel-title: #e4e7eb;
+  --bg-tab-selected: #f7f8f9;
+  --file-tab: #1f5fbf;
+  --file-tab-hover: #2a6fd6;
+  --contextual: #2f8f3a;
+  --contextual-bg: #e3f2e1;
+
+  --bg-panel: #ffffff;
+  --bg-panel-header: #dde1e6;
+  --bg-group-header: #e9ecf0;
+  --bg-label: #f3f4f6;
+  --bg-hover: #e6effb;
+  --bg-selected: #cfe2fb;
+  --bg-input: #ffffff;
+  --bg-view-tabs: #d8dce1;
+  --bg-statusbar: #e2e5e9;
+  --bg-menu: #ffffff;
+  --bg-dialog: #f7f8f9;
+  --bg-dialog-title: #e4e7eb;
+
+  --fg: #1f2329;
+  --fg-muted: #66707c;
+  --fg-disabled: #a3aab3;
+  --border: #c9ced5;
+  --border-strong: #aab1ba;
+  --accent: #1f6fff;
+  --accent-fg: #ffffff;
+  --focus: #1f6fff;
+
+  --temp-frame: #00b2e3;
+  --reveal-frame: #d400d4;
+  --select-box: #1f6fff;
+  --shadow: 0 6px 24px rgba(15, 23, 42, 0.18), 0 1px 3px rgba(15, 23, 42, 0.12);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg-app: #1e2227;
+  --bg-titlebar: #15181c;
+  --fg-titlebar: #d9dde2;
+  --bg-ribbon-tabs: #262b31;
+  --bg-ribbon: #2f353c;
+  --bg-ribbon-panel-title: #282d33;
+  --bg-tab-selected: #2f353c;
+  --file-tab: #2a6fd6;
+  --file-tab-hover: #3b7fe6;
+  --contextual: #5cc06a;
+  --contextual-bg: #2c3d2e;
+
+  --bg-panel: #2a2f35;
+  --bg-panel-header: #22262b;
+  --bg-group-header: #33393f;
+  --bg-label: #2f353b;
+  --bg-hover: #36414f;
+  --bg-selected: #284b7a;
+  --bg-input: #1f2328;
+  --bg-view-tabs: #22262b;
+  --bg-statusbar: #22262b;
+  --bg-menu: #2f353c;
+  --bg-dialog: #2a2f35;
+  --bg-dialog-title: #22262b;
+
+  --fg: #e3e6ea;
+  --fg-muted: #9aa3ad;
+  --fg-disabled: #5e6670;
+  --border: #3d444c;
+  --border-strong: #4d555e;
+  --accent: #4b8dff;
+  --focus: #6aa2ff;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+}

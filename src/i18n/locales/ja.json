@@ -1,0 +1,519 @@
+{
+  "app": {
+    "name": "RVT ビューア"
+  },
+  "common": {
+    "ok": "OK",
+    "cancel": "キャンセル",
+    "apply": "適用",
+    "close": "閉じる",
+    "edit": "編集...",
+    "closePalette": "{{name}} を閉じる",
+    "closeView": "{{name}} を閉じる"
+  },
+  "qat": {
+    "label": "クイック アクセス ツールバー"
+  },
+  "ribbon": {
+    "tab": {
+      "file": "ファイル",
+      "view": "表示",
+      "manage": "管理",
+      "modifyCategory": "修正 | {{category}}",
+      "modifyMultiple": "修正 | 複数選択"
+    },
+    "panel": {
+      "graphics": "グラフィックス",
+      "create": "作成",
+      "windows": "ウィンドウ",
+      "settings": "設定",
+      "inquiry": "照会",
+      "options": "オプション",
+      "selection": "選択",
+      "properties": "プロパティ",
+      "view": "ビュー"
+    },
+    "minimize": "リボンを最小化",
+    "expand": "リボンを展開",
+    "tempHideIsolate": "一時的に非表示/分離"
+  },
+  "command": {
+    "open": "開く",
+    "openEllipsis": "開く...",
+    "close": "閉じる",
+    "export": "書き出し",
+    "options": "オプション",
+    "about": "バージョン情報",
+    "default3D": "既定の 3D ビュー",
+    "closeInactive": "非アクティブ ビューを閉じる",
+    "userInterface": "ユーザー インターフェース",
+    "visibilityGraphics": "表示/グラフィックス",
+    "revealHidden": "非表示要素を一時的に表示",
+    "sectionBox": "切断ボックス",
+    "selectionBox": "選択ボックス",
+    "projectInfo": "プロジェクト情報",
+    "projectUnits": "プロジェクトの単位",
+    "fileInfo": "ファイル情報",
+    "diagnostics": "読込診断",
+    "filter": "フィルタ",
+    "tempHideIsolate": "一時的に非表示/選択要素を分離",
+    "isolateCategory": "カテゴリを選択要素として分離",
+    "hideCategory": "カテゴリを非表示",
+    "isolateElements": "要素を選択要素として分離",
+    "hideElements": "要素を非表示",
+    "resetTemp": "一時的な非表示/選択要素を分離をリセット",
+    "applyTempToView": "非表示/選択要素を分離をビューに適用",
+    "hideInView": "ビューで非表示",
+    "hideElementsInView": "要素",
+    "hideCategoryInView": "カテゴリ",
+    "unhide": "非表示を解除",
+    "unhideElements": "要素の非表示を解除",
+    "unhideCategory": "カテゴリの非表示を解除",
+    "zoomSelection": "選択要素にズーム",
+    "zoomExtents": "全体表示",
+    "zoomRegion": "領域ズーム",
+    "zoomOut": "縮小 (2 倍)",
+    "zoomPrevious": "前回のパン/ズーム",
+    "cancel": "キャンセル",
+    "selectAllInstances": "すべてのインスタンスを選択",
+    "visibleInView": "ビューに表示",
+    "inEntireProject": "プロジェクト全体",
+    "openView": "開く",
+    "expand": "展開",
+    "collapse": "折りたたむ"
+  },
+  "ui": {
+    "properties": "プロパティ",
+    "projectBrowser": "プロジェクト ブラウザ",
+    "projectBrowserTitle": "プロジェクト ブラウザ",
+    "statusBar": "ステータス バー",
+    "navigationBar": "ナビゲーション バー",
+    "viewCube": "ViewCube",
+    "viewControlBar": "ビュー コントロール バー",
+    "openViews": "開いているビュー",
+    "resizeDock": "パレットの幅を変更",
+    "resizePalettes": "パレットの高さを変更"
+  },
+  "browser": {
+    "views": "ビュー (すべて)",
+    "floorPlans": "平面図",
+    "threeDViews": "3D ビュー",
+    "elevations": "立面図 (建物立面図)",
+    "schedules": "集計表/数量 (すべて)",
+    "families": "ファミリ",
+    "unnamedFamily": "(ファミリ名なし)",
+    "unnamedType": "(タイプ名なし)",
+    "search": "プロジェクト ブラウザを検索",
+    "noDocument": "プロジェクトが開かれていません。"
+  },
+  "view": {
+    "plan": "平面図",
+    "kind": {
+      "plan": "平面図",
+      "3d": "3D ビュー",
+      "elevation": "立面図",
+      "schedule": "集計表"
+    },
+    "kindPrefix": {
+      "plan": "平面図: {{name}}",
+      "3d": "3D ビュー: {{name}}",
+      "elevation": "立面図: {{name}}",
+      "schedule": "集計表: {{name}}"
+    },
+    "direction": {
+      "east": "東",
+      "north": "北",
+      "south": "南",
+      "west": "西"
+    },
+    "schedule": {
+      "elements": "要素集計表",
+      "rooms": "部屋集計表"
+    },
+    "noGeometry": "このファイルから表示できる形状は取得できませんでした。プロジェクト ブラウザの集計表や「管理」タブのファイル情報を確認してください。",
+    "noOpenView": "開いているビューはありません。プロジェクト ブラウザでビューをダブルクリックして開きます。"
+  },
+  "viewCube": {
+    "top": "上",
+    "bottom": "下",
+    "front": "前",
+    "back": "後",
+    "left": "左",
+    "right": "右",
+    "north": "北",
+    "east": "東",
+    "south": "南",
+    "west": "西",
+    "goHome": "ホームに移動",
+    "setHome": "現在のビューをホーム ビューとして設定"
+  },
+  "viewFrame": {
+    "temp": "一時的な非表示/選択要素を分離",
+    "reveal": "非表示要素を一時的に表示"
+  },
+  "visualStyle": {
+    "wireframe": "ワイヤフレーム",
+    "hiddenLine": "隠線処理",
+    "shaded": "シェーディング",
+    "consistentColors": "色の一貫性"
+  },
+  "projection": {
+    "ortho": "平行投影",
+    "perspective": "透視投影"
+  },
+  "nav": {
+    "pan": "パン",
+    "orbit": "オービット",
+    "zoomMenu": "ズーム"
+  },
+  "vcb": {
+    "scale": "1 : {{scale}}",
+    "visualStyle": "表示スタイル: {{style}}",
+    "mouseHint": "ホイール: ズーム / 中ボタン: パン / Shift+中ボタン: オービット",
+    "mouseHelp": "ホイールでカーソル位置にズーム、中ボタン ドラッグでパン、Shift+中ボタン ドラッグでオービット、中ボタンのダブルクリックで全体表示。左ドラッグで窓選択 (右方向) / 交差選択 (左方向)。"
+  },
+  "status": {
+    "ready": "準備完了",
+    "selectHint": "クリックして選択、Ctrl+クリックで追加、Shift+クリックで選択解除。",
+    "panMode": "パン: ドラッグして移動。右クリックまたは Esc で終了。",
+    "orbitMode": "オービット: ドラッグして回転。右クリックまたは Esc で終了。",
+    "zoomRegion": "ズームする範囲をドラッグで指定します。",
+    "revitVersion": "Revit {{version}}",
+    "revitVersionTitle": "ファイルを保存した Revit のバージョン"
+  },
+  "confidence": {
+    "geometry": "形状あり",
+    "typed_no_geometry": "要素のみ (形状なし)",
+    "diagnostic_partial": "部分的に読込",
+    "proxy_only": "代理要素のみ",
+    "scaffold": "メタデータのみ"
+  },
+  "properties": {
+    "nothing": "ビューを開くとプロパティが表示されます。",
+    "common": "共通 ({{count}})",
+    "categoryCount": "{{category}} ({{count}})",
+    "filterLabel": "プロパティを表示するカテゴリ",
+    "editType": "タイプ編集",
+    "editTypeDisabled": "閲覧専用のため編集できません",
+    "multipleTypes": "複数のタイプ",
+    "multipleFamilies": "複数のファミリ",
+    "more": "ほか {{count}} 件"
+  },
+  "propGroup": {
+    "identity": "識別情報",
+    "constraints": "拘束",
+    "dimensions": "寸法",
+    "materials": "マテリアル/仕上げ",
+    "relations": "関連要素",
+    "other": "その他",
+    "decode": "読込情報 (rvt-rs)",
+    "graphics": "グラフィックス",
+    "extents": "範囲"
+  },
+  "prop": {
+    "category": "カテゴリ",
+    "family": "ファミリ",
+    "type": "タイプ",
+    "roomNumber": "番号",
+    "roomName": "名前",
+    "elementId": "要素 ID",
+    "globalId": "IFC GUID",
+    "ifcClass": "IFC クラス",
+    "revitClass": "Revit クラス",
+    "level": "基準レベル",
+    "levelElevation": "レベル高さ",
+    "baseOffset": "基準レベル オフセット",
+    "host": "ホスト",
+    "length": "長さ",
+    "thickness": "厚さ",
+    "unconnectedHeight": "指定高さ",
+    "unboundedHeight": "高さ (境界なし)",
+    "area": "面積",
+    "perimeter": "周長",
+    "volume": "体積",
+    "width": "幅",
+    "depth": "奥行き",
+    "height": "高さ",
+    "locationX": "位置 X",
+    "locationY": "位置 Y",
+    "locationZ": "位置 Z",
+    "rotation": "回転",
+    "material": "マテリアル",
+    "layer": "レイヤ {{n}}",
+    "layerTotal": "合計厚さ",
+    "hosted": "挿入要素",
+    "joinStart": "結合 (始点)",
+    "joinEnd": "結合 (終点)",
+    "partOf": "親要素",
+    "parts": "構成要素",
+    "roomContents": "部屋内の要素",
+    "geometrySource": "形状の取得元"
+  },
+  "param": {
+    "typeMark": "タイプ マーク",
+    "mark": "マーク",
+    "comments": "コメント",
+    "fireRating": "耐火等級",
+    "description": "説明",
+    "manufacturer": "製造元",
+    "model": "モデル",
+    "assemblyCode": "アセンブリ コード",
+    "typeComments": "タイプ コメント",
+    "cost": "コスト",
+    "url": "URL",
+    "function": "機能",
+    "reference": "参照",
+    "isExternal": "外部",
+    "loadBearing": "耐力"
+  },
+  "value": {
+    "yes": "はい",
+    "no": "いいえ",
+    "unknown": "不明",
+    "unassigned": "(未割り当て)",
+    "bboxBody": "境界ボックス (近似)",
+    "decodedBody": "解析済み形状",
+    "noBody": "形状なし"
+  },
+  "viewProp": {
+    "visualStyle": "表示スタイル",
+    "visibilityGraphics": "表示/グラフィックスの上書き",
+    "associatedLevel": "関連レベル",
+    "cutPlane": "切断面の高さ (mm)",
+    "viewDepth": "ビュー範囲の下端 (mm)",
+    "sectionBox": "切断ボックス",
+    "projection": "投影",
+    "viewName": "ビュー名"
+  },
+  "category": {
+    "walls": "壁",
+    "curtainWalls": "カーテン ウォール",
+    "curtainPanels": "カーテン パネル",
+    "curtainMullions": "カーテン ウォール マリオン",
+    "floors": "床",
+    "roofs": "屋根",
+    "ceilings": "天井",
+    "doors": "ドア",
+    "windows": "窓",
+    "columns": "柱",
+    "structuralFraming": "構造フレーム",
+    "structuralFoundations": "構造基礎",
+    "stairs": "階段",
+    "ramps": "スロープ",
+    "railings": "手すり",
+    "furniture": "家具",
+    "rooms": "部屋",
+    "plumbingFixtures": "衛生器具",
+    "electricalEquipment": "電気機器",
+    "lightingFixtures": "照明器具",
+    "pipes": "配管",
+    "pipeFittings": "配管継手",
+    "ducts": "ダクト",
+    "ductFittings": "ダクト継手",
+    "airTerminals": "制気口",
+    "fireAlarmDevices": "火災報知機器",
+    "mechanicalEquipment": "機械設備",
+    "specialtyEquipment": "特殊設備",
+    "shadingDevices": "日よけ",
+    "rebar": "鉄筋",
+    "genericModels": "一般モデル"
+  },
+  "schedule": {
+    "count": "{{count}} 行",
+    "exportCsv": "CSV に書き出し",
+    "col": {
+      "category": "カテゴリ",
+      "family": "ファミリ",
+      "type": "タイプ",
+      "level": "レベル",
+      "typeMark": "タイプ マーク",
+      "material": "マテリアル",
+      "elementId": "要素 ID",
+      "number": "番号",
+      "name": "名前",
+      "area": "面積 (m²)",
+      "perimeter": "周長 ({{unit}})",
+      "volume": "体積 (m³)"
+    }
+  },
+  "vg": {
+    "title": "表示/グラフィックスの上書き: {{view}}",
+    "modelCategories": "モデル カテゴリ",
+    "filter": "フィルタ リスト:",
+    "all": "すべて",
+    "none": "なし",
+    "invert": "反転",
+    "visibility": "表示",
+    "category": "カテゴリ",
+    "surfaceColor": "サーフェス色",
+    "transparency": "透過性",
+    "halftone": "ハーフトーン",
+    "visibleOf": "{{category}} を表示",
+    "overrideColor": "サーフェス色を上書き",
+    "note": "設定はこのビューにのみ適用されます。"
+  },
+  "filter": {
+    "title": "フィルタ",
+    "category": "カテゴリ",
+    "count": "数",
+    "checkAll": "すべてチェック",
+    "checkNone": "チェックをすべて外す",
+    "total": "選択された項目の合計: {{count}}"
+  },
+  "projectInfo": {
+    "title": "プロジェクト情報",
+    "name": "プロジェクト名",
+    "fileName": "ファイル名",
+    "revitVersion": "Revit バージョン",
+    "elements": "要素数",
+    "materials": "マテリアル数",
+    "description": "読込メモ",
+    "levels": "レベル",
+    "levelName": "名前",
+    "elevation": "高さ ({{unit}})",
+    "categories": "カテゴリ別の要素数"
+  },
+  "fileInfo": {
+    "title": "ファイル情報",
+    "fileName": "ファイル名",
+    "fileSize": "ファイル サイズ",
+    "revitVersion": "Revit バージョン",
+    "build": "ビルド",
+    "lastSaved": "最終保存日時",
+    "username": "最終保存ユーザー",
+    "worksharing": "ワークシェアリング",
+    "centralPath": "中央モデルのパス",
+    "lastSavePath": "最終保存パス",
+    "documentGuid": "ドキュメント GUID",
+    "increments": "保存回数",
+    "locale": "保存時のロケール",
+    "streams": "ストリーム数",
+    "basicFileInfo": "BasicFileInfo の全項目"
+  },
+  "diagnostics": {
+    "title": "読込診断",
+    "lead": "rvt-rs がこのファイルから復元できた情報の範囲です。形状の一部は境界ボックスによる近似で表示されます。",
+    "level": "読込レベル",
+    "score": "信頼度",
+    "elements": "要素数",
+    "withGeometry": "形状のある要素",
+    "bboxBodies": "境界ボックス近似の要素",
+    "storeys": "レベル数",
+    "materials": "マテリアル数",
+    "parameters": "パラメータ値の数",
+    "warnings": "警告 ({{count}})",
+    "unsupported": "未対応の機能",
+    "download": "診断 JSON を保存"
+  },
+  "units": {
+    "title": "プロジェクトの単位",
+    "length": "長さ",
+    "mm": "ミリメートル (mm)",
+    "m": "メートル (m)",
+    "note": "表示上の単位です。ファイルの内容は変更されません。"
+  },
+  "options": {
+    "title": "オプション",
+    "language": "言語",
+    "theme": "UI テーマ",
+    "background": "ビューの背景色",
+    "themes": {
+      "light": "ライト",
+      "dark": "ダーク",
+      "system": "システム設定に合わせる"
+    },
+    "backgrounds": {
+      "white": "白",
+      "gray": "グレー",
+      "black": "黒"
+    }
+  },
+  "language": {
+    "ja": "日本語"
+  },
+  "about": {
+    "title": "バージョン情報",
+    "version": "バージョン {{version}}",
+    "description": "Revit ファイル (.rvt / .rfa / .rte / .rft) をブラウザだけで閲覧するビューアです。編集機能はありません。",
+    "privacy": "ファイルは端末内で解析され、外部に送信されることはありません。",
+    "poweredBy": "ファイルの読み込みには",
+    "rvtLicense": "Apache License 2.0",
+    "source": "ソースコード (GitHub)",
+    "trademark": "Autodesk および Revit は Autodesk, Inc. の登録商標です。本アプリは Autodesk, Inc. とは関係がなく、同社による承認・支援を受けたものではありません。",
+    "notices": "著作権・商標表示 (NOTICE)",
+    "license": "ライセンス (Apache-2.0)"
+  },
+  "home": {
+    "navLabel": "ホーム",
+    "models": "モデル",
+    "lead": "Revit ファイルを開いて、ブラウザ上で閲覧します。",
+    "dropzone": "ここに .rvt ファイルをドロップ、またはクリックして開く",
+    "dropzoneSub": "対応形式: .rvt / .rfa / .rte / .rft",
+    "dropHere": "ドロップしてファイルを開く",
+    "privacyTitle": "ファイルは送信されません",
+    "privacy": "解析はすべてこの端末のブラウザ内で行われます。",
+    "offlineTitle": "オフラインで動作",
+    "offline": "インストールするとオフラインでも使用でき、Revit ファイルをこのアプリで直接開けます。",
+    "supportTitle": "対応状況 (rvt-rs)",
+    "support2024": "Revit 2024 / 2025: 要素と形状",
+    "support2023": "Revit 2023: 要素 (境界ボックス形状)",
+    "supportOther": "その他のバージョン: ファイル情報のみ",
+    "supportFamily": "ファミリ (.rfa): ファイル情報のみ"
+  },
+  "recent": {
+    "title": "最近使用したファイル",
+    "empty": "最近使用したファイルはありません。",
+    "emptyHome": "最近使用したファイルはありません。ファイルを開くとここに表示されます (対応ブラウザのみ)。",
+    "unavailable": "{{name}} を開けませんでした。ファイルが移動または削除された可能性があります。"
+  },
+  "file": {
+    "pickerDescription": "Revit ファイル",
+    "notRevitExtension": "{{name}} は Revit ファイル (.rvt / .rfa / .rte / .rft) ではありません。"
+  },
+  "loading": {
+    "title": "ファイルを開いています",
+    "opening": "{{name}} を開いています...",
+    "version": "Revit {{version}} のファイル",
+    "elapsed": "経過時間 {{seconds}} 秒",
+    "step": {
+      "init": "読込エンジンを初期化",
+      "metadata": "ファイル情報を読み込み",
+      "parse": "モデルを解析",
+      "scene": "モデル構造を構築",
+      "geometry": "形状を生成",
+      "schedule": "集計表を作成"
+    }
+  },
+  "loadError": {
+    "title": "{{name}} を開けませんでした",
+    "notRevit": "Revit ファイルとして読み取れませんでした。ファイルが壊れているか、Revit ファイルではない可能性があります。",
+    "unsupportedVersion": "このバージョンの Revit ファイルには対応していません。",
+    "outOfMemory": "メモリが不足しました。ファイルが大きすぎる可能性があります。",
+    "unknown": "ファイルの解析中にエラーが発生しました。",
+    "details": "詳細"
+  },
+  "export": {
+    "title": "書き出し",
+    "ifc": "IFC (IFC4)",
+    "ifcHint": "IFC4 STEP 形式で書き出します",
+    "glb": "glTF (GLB)",
+    "glbHint": "3D 形状を glTF バイナリで書き出します",
+    "planSvg": "平面図 (SVG)",
+    "planSvgHint": "モデル全体の上面図を SVG で書き出します",
+    "csvElements": "要素集計表 (CSV)",
+    "csvRooms": "部屋集計表 (CSV)",
+    "csvHint": "Excel で開ける CSV (長さはメートル)",
+    "diagnostics": "読込診断 (JSON)",
+    "diagnosticsHint": "rvt-rs の読込結果の詳細",
+    "done": "{{name}} を書き出しました。",
+    "failed": "書き出しに失敗しました: {{detail}}"
+  },
+  "error": {
+    "geometry": "形状の表示に失敗しました: {{detail}}"
+  },
+  "pwa": {
+    "updateAvailable": "新しいバージョンがあります。",
+    "offlineReady": "オフラインで使用できるようになりました。",
+    "reload": "更新"
+  }
+}

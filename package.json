@@ -1,0 +1,48 @@
+{
+  "name": "rvt-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "ブラウザ完結の Revit (.rvt) ビューア。rvt-rs (WebAssembly) を利用した PWA。",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@12.5.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "dev": "vite",
+    "build": "pnpm run typecheck && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "icons": "pwa-assets-generator --config pwa-assets.config.ts"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "^3.14.15",
+    "i18next": "^26.4.3",
+    "idb-keyval": "^6.3.0",
+    "lucide-react": "^1.55.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-i18next": "^17.0.16",
+    "three": "^0.186.1",
+    "three-mesh-bvh": "^0.9.16",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/three": "^0.186.0",
+    "@vite-pwa/assets-generator": "^2.0.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vite-plugin-pwa": "^2.0.0",
+    "vitest": "^5.0.3",
+    "workbox-window": "^7.4.1"
+  }
+}
