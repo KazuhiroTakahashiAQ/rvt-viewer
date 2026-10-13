@@ -162,11 +162,6 @@ select {
   background: var(--bg-titlebar);
   color: var(--fg-titlebar);
   user-select: none;
-  app-region: drag;
-}
-
-.titlebar button {
-  app-region: no-drag;
 }
 
 .titlebar-left,

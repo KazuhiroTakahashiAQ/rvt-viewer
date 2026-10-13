@@ -68,7 +68,6 @@ export default defineConfig({
         start_url: BASE,
         scope: BASE,
         display: 'standalone',
-        display_override: ['window-controls-overlay', 'standalone'],
         orientation: 'any',
         theme_color: '#1f3a5f',
         background_color: '#f0f0f0',
