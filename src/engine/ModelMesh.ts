@@ -88,11 +88,12 @@ export class ModelMesh {
       edgeChunks.push({ positions: edges, matrix, entity });
     });
 
-    for (const batch of batches.values()) this.buildBatch(batch, uniforms);
+    const volumeCache = new Map<string, number>();
+    for (const batch of batches.values()) this.buildBatch(batch, uniforms, volumeCache);
     this.buildEdges(edgeChunks, uniforms);
   }
 
-  private buildBatch(batch: Batch, uniforms: SharedUniforms): void {
+  private buildBatch(batch: Batch, uniforms: SharedUniforms, volumeCache: Map<string, number>): void {
     let vertexCount = 0;
     let indexCount = 0;
     for (const item of batch.items) {
@@ -118,9 +119,11 @@ export class ModelMesh {
         entities[vOffset + i] = item.entity;
         box.expandByPoint(v);
       }
-      // A mirroring transform flips triangle winding; flip it back so
-      // front faces stay outward (the section cut fill relies on it).
-      const flip = item.matrix.determinant() < 0;
+      // Front faces must point outward: the section cut fill draws back
+      // faces. Some rvt-rs bodies come out inside-out (e.g. slabs whose
+      // sketch runs clockwise) and mirroring transforms flip winding too,
+      // so orient by the signed volume in world space.
+      const flip = signedVolume(item.geometry, volumeCache) * item.matrix.determinant() < 0;
       const index = item.geometry.index;
       const n = index ? index.count : pos.count;
       for (let i = 0; i < n; i += 3) {
@@ -239,6 +242,33 @@ export class ModelMesh {
     this.state.dispose();
     this.root.clear();
   }
+}
+
+/**
+ * Signed volume of a triangle mesh (positive when triangles wind
+ * counter-clockwise seen from outside). Open or flat meshes give ~0 and
+ * are treated as outward-facing.
+ */
+export function signedVolume(geometry: THREE.BufferGeometry, cache?: Map<string, number>): number {
+  const cached = cache?.get(geometry.uuid);
+  if (cached !== undefined) return cached;
+  const pos = geometry.getAttribute('position');
+  const index = geometry.index;
+  const n = index ? index.count : pos.count;
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  let volume = 0;
+  for (let i = 0; i + 2 < n; i += 3) {
+    a.fromBufferAttribute(pos, index ? index.getX(i) : i);
+    b.fromBufferAttribute(pos, index ? index.getX(i + 1) : i + 1);
+    c.fromBufferAttribute(pos, index ? index.getX(i + 2) : i + 2);
+    volume += a.dot(b.cross(c));
+  }
+  volume /= 6;
+  const result = Math.abs(volume) < 1e-12 ? 1 : volume;
+  cache?.set(geometry.uuid, result);
+  return result;
 }
 
 function entityIndexOf(obj: THREE.Object3D): number | null {

@@ -7,7 +7,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Projection } from '../engine/CameraRig';
 import type { VisualStyle } from '../engine/modelMaterials';
-import type { CategoryOverride, NavMode, PlanRange, SectionBoxState, TempMode } from '../engine/types';
+import { type CategoryOverride, type NavMode, type PlanRange, type SectionBoxState, type TempMode, UNASSIGNED_LEVEL } from '../engine/types';
 import { type CategoryKey, hiddenByDefault } from '../model/categories';
 import type { ModelIndex } from '../model/modelIndex';
 import type { LengthUnit } from '../model/units';
@@ -45,6 +45,8 @@ export interface ViewSettings {
   sectionBox: SectionBoxState;
   planRange: PlanRange;
   hiddenCategories: CategoryKey[];
+  /** Storey indices hidden in this view (UNASSIGNED_LEVEL for elements without a level). */
+  hiddenLevels: number[];
   hiddenElements: number[];
   overrides: Partial<Record<CategoryKey, CategoryOverride>>;
   tempMode: TempMode;
@@ -133,6 +135,8 @@ interface Actions {
   tempHideIsolate(mode: 'hide' | 'isolate', target: 'elements' | 'category'): void;
   resetTemp(): void;
   toggleReveal(): void;
+  /** Hide/show the elements of the given levels in the active view; `only` hides every other level. */
+  setLevelsVisible(levels: number[], visible: boolean, only?: boolean): void;
   unhideInView(target: 'elements' | 'category'): void;
 
   setRibbonTab(tab: RibbonTab): void;
@@ -166,6 +170,7 @@ export function defaultViewSettings(view: ViewDef): ViewSettings {
     sectionBox: { enabled: false, min: null, max: null },
     planRange: { cutMm: 1200, bottomMm: 0 },
     hiddenCategories: hidden,
+    hiddenLevels: [],
     hiddenElements: [],
     overrides: {},
     tempMode: 'none',
@@ -327,6 +332,24 @@ export const useStore = create<State & Actions>()(
         if (id && vs) get().updateViewSettings(id, { reveal: !vs.reveal });
       },
 
+      setLevelsVisible: (levels, visible, only = false) => {
+        const s = get();
+        const id = s.activeViewId;
+        const vs = activeSettings(s);
+        if (!id || !vs || !s.doc) return;
+        let hidden: number[];
+        if (only) {
+          const keep = new Set(levels);
+          hidden = levelKeys(s.doc.index).filter((l) => !keep.has(l));
+        } else if (visible) {
+          const drop = new Set(levels);
+          hidden = vs.hiddenLevels.filter((l) => !drop.has(l));
+        } else {
+          hidden = [...new Set([...vs.hiddenLevels, ...levels])];
+        }
+        get().updateViewSettings(id, { hiddenLevels: hidden });
+      },
+
       setRibbonTab: (ribbonTab) => set({ ribbonTab }),
       openDialog: (dialog) => set({ dialog, appMenuOpen: false }),
       setAppMenuOpen: (appMenuOpen) => set({ appMenuOpen }),
@@ -349,6 +372,13 @@ export const useStore = create<State & Actions>()(
     },
   ),
 );
+
+/** Level keys present in the model: storey indices, plus UNASSIGNED_LEVEL when some element has none. */
+export function levelKeys(index: ModelIndex): number[] {
+  const keys: number[] = index.storeys.map((s) => s.index);
+  if (index.elements.some((e) => e.storeyIndex === null)) keys.push(UNASSIGNED_LEVEL);
+  return keys;
+}
 
 export function selectionCategories(index: ModelIndex, selection: number[]): CategoryKey[] {
   const cats = new Set<CategoryKey>();

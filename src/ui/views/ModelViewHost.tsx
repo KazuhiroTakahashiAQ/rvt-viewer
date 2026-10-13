@@ -11,7 +11,7 @@ import {
 } from '../../app/commands';
 import { setViewer } from '../../app/viewerBridge';
 import { Viewer } from '../../engine/Viewer';
-import type { DisplayConfig, ModelViewConfig } from '../../engine/types';
+import { type DisplayConfig, type ModelViewConfig, UNASSIGNED_LEVEL } from '../../engine/types';
 import { FEET_TO_METRES } from '../../model/units';
 import { elementLabel } from '../../model/properties';
 import { type ViewSettings, useStore } from '../../state/store';
@@ -37,6 +37,7 @@ function toViewConfig(view: ViewDef, settings: ViewSettings, levelFeet: number |
 function toDisplay(settings: ViewSettings): DisplayConfig {
   return {
     hiddenCategories: new Set(settings.hiddenCategories),
+    hiddenLevels: new Set(settings.hiddenLevels),
     hiddenElements: new Set(settings.hiddenElements),
     overrides: settings.overrides,
     tempMode: settings.tempMode,
@@ -141,7 +142,10 @@ export function ModelViewHost({ visible }: { visible: boolean }) {
     setReady(false);
     useStore.getState().consumeGlb();
     void viewer
-      .loadModel(glb, doc.model.entities.length, (e) => index.byIndex.get(e)?.category)
+      .loadModel(glb, doc.model.entities.length, {
+        categoryOf: (e) => index.byIndex.get(e)?.category,
+        levelOf: (e) => index.byIndex.get(e)?.storeyIndex ?? UNASSIGNED_LEVEL,
+      })
       .then(() => setReady(true))
       .catch((err: unknown) => {
         useStore.getState().pushToast('error', t('error.geometry', { detail: err instanceof Error ? err.message : String(err) }));
@@ -160,7 +164,7 @@ export function ModelViewHost({ visible }: { visible: boolean }) {
 
   const display = useMemo(
     () => (settings ? toDisplay(settings) : null),
-    [settings?.hiddenCategories, settings?.hiddenElements, settings?.overrides, settings?.tempMode, settings?.tempElements, settings?.reveal],
+    [settings?.hiddenCategories, settings?.hiddenLevels, settings?.hiddenElements, settings?.overrides, settings?.tempMode, settings?.tempElements, settings?.reveal],
   );
   useEffect(() => {
     if (ready && display && config) viewerRef.current?.applyDisplay(display);

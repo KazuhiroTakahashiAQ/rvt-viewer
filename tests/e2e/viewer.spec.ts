@@ -1,5 +1,5 @@
 import { expect, type Page, test } from '@playwright/test';
-import { openSample } from './helpers';
+import { darkRatio, openSample } from './helpers';
 
 const SAMPLE = process.env.RVT_SAMPLE;
 const SHOTS = process.env.RVT_SCREENSHOTS;
@@ -127,7 +127,7 @@ test.describe('with a sample model', () => {
     await expect(dialog).toHaveCount(0);
 
     // Project Browser: open a floor plan, an elevation and a schedule.
-    const plan = page.locator('.tree-row.kind-view').filter({ has: page.locator('svg') }).first();
+    const plan = page.locator('.tree-row[data-view-kind="plan"]').first();
     await plan.dblclick();
     await expect(page.locator('.view-tab.active')).toContainText('平面図');
     await page.waitForTimeout(600);
@@ -138,6 +138,24 @@ test.describe('with a sample model', () => {
     await expect(page.locator('.schedule-row').first()).toBeVisible();
     await shot(page, '08-schedule');
 
+    // Level visibility in the 3D view: "show only this level" from a plan row, then all levels again.
+    await page.locator('.view-tab', { hasText: '3D ビュー' }).click();
+    const levelRow = page.locator('.tree-row[data-view-kind="plan"]').first();
+    const levelName = ((await levelRow.textContent()) ?? '').trim();
+    await levelRow.click({ button: 'right' });
+    await page.getByRole('menuitem', { name: 'アクティブ ビューでこのレベルのみ表示' }).click();
+    await page.waitForTimeout(400);
+    await shot(page, '09-only-level');
+    await page.getByRole('button', { name: '表示/グラフィックス' }).first().click();
+    await page.getByRole('tab', { name: 'レベル' }).click();
+    const levelChecks = page.locator('.vg-level-row:not(.vg-head) input[type="checkbox"]');
+    const levelCount = await levelChecks.count();
+    expect(levelCount).toBeGreaterThan(0);
+    await expect(page.locator('.vg-level-row', { hasText: levelName }).locator('input[type="checkbox"]')).toBeChecked();
+    await expect(page.locator('.vg-level-row:not(.vg-head) input[type="checkbox"]:checked')).toHaveCount(1);
+    await page.getByRole('button', { name: 'すべて', exact: true }).click();
+    await page.getByRole('button', { name: 'OK' }).click();
+
     // Export IFC from the File menu.
     await page.getByRole('button', { name: 'ファイル', exact: true }).click();
     await page.getByRole('button', { name: '書き出し', exact: true }).click();
@@ -146,5 +164,23 @@ test.describe('with a sample model', () => {
     expect((await download).suggestedFilename()).toMatch(/\.ifc$/);
 
     expect(errors).toEqual([]);
+  });
+
+  test('floor plans are not crushed to black by the cut fill', async ({ page }) => {
+    await page.goto('./');
+    await openSample(page, SAMPLE!);
+    await expect(page.locator('.view-tab.active')).toBeVisible({ timeout: 90_000 });
+    const plans = page.locator('.tree-row[data-view-kind="plan"]');
+    const n = await plans.count();
+    expect(n).toBeGreaterThan(0);
+    for (let i = 0; i < n; i++) {
+      const row = plans.nth(i);
+      const name = (await row.textContent()) ?? '';
+      await row.dblclick();
+      await expect(page.locator('.view-tab.active')).toContainText(name);
+      await page.waitForTimeout(400);
+      const ratio = darkRatio(await page.locator('.view-content').screenshot());
+      expect(ratio, `plan "${name}" dark share`).toBeLessThan(0.3);
+    }
   });
 });

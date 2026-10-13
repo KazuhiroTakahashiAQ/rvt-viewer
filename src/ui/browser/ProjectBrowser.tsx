@@ -68,6 +68,8 @@ export function ProjectBrowser() {
     setFocusId(node.id);
     const items: MenuItem[] = [];
     if (node.viewId) items.push({ id: 'open', label: t('command.openView'), onSelect: () => openView(node.viewId!) });
+    const level = node.viewId ? views.find((v) => v.id === node.viewId && v.kind === 'plan')?.storeyIndex : undefined;
+    if (level !== undefined) items.push(...levelMenu(level));
     if (node.elements?.length) {
       items.push({
         id: 'selectAll',
@@ -82,6 +84,37 @@ export function ProjectBrowser() {
       items.push({ id: 'expand', label: expanded.has(node.id) ? t('command.collapse') : t('command.expand'), onSelect: () => toggle(node.id) });
     }
     if (items.length) setMenu({ x: ev.clientX, y: ev.clientY, items });
+  };
+
+  /** Plan-view rows stand for their level: select its elements, or hide/show it in the active view. */
+  const levelMenu = (level: number): MenuItem[] => {
+    const s = useStore.getState();
+    const active = s.views.find((v) => v.id === s.activeViewId);
+    const hidden = s.activeViewId ? (s.viewSettings[s.activeViewId]?.hiddenLevels ?? []) : [];
+    const inModelView = !!active && active.kind !== 'schedule';
+    const elements = doc.index.elements.filter((e) => e.storeyIndex === level).map((e) => e.index);
+    return [
+      {
+        id: 'selectLevel',
+        label: t('command.selectLevelElements'),
+        disabled: elements.length === 0,
+        submenu: [
+          { id: 'view', label: t('command.visibleInView'), onSelect: () => selectElements(elements, 'view') },
+          { id: 'project', label: t('command.inEntireProject'), onSelect: () => selectElements(elements, 'project') },
+        ],
+      },
+      { id: 'sepLevel', separator: true },
+      hidden.includes(level)
+        ? { id: 'showLevel', label: t('command.showLevelInView'), disabled: !inModelView, onSelect: () => s.setLevelsVisible([level], true) }
+        : { id: 'hideLevel', label: t('command.hideLevelInView'), disabled: !inModelView, onSelect: () => s.setLevelsVisible([level], false) },
+      { id: 'onlyLevel', label: t('command.showOnlyLevelInView'), disabled: !inModelView, onSelect: () => s.setLevelsVisible([level], true, true) },
+      {
+        id: 'allLevels',
+        label: t('command.showAllLevelsInView'),
+        disabled: !inModelView || hidden.length === 0,
+        onSelect: () => s.activeViewId && s.updateViewSettings(s.activeViewId, { hiddenLevels: [] }),
+      },
+    ];
   };
 
   const onKeyDown = (ev: React.KeyboardEvent) => {
@@ -148,6 +181,7 @@ export function ProjectBrowser() {
                 aria-expanded={row.hasChildren ? row.expanded : undefined}
                 aria-selected={focusId === node.id}
                 aria-level={row.depth + 1}
+                data-view-kind={node.viewId ? viewKind.get(node.viewId) : undefined}
                 className={`tree-row${focusId === node.id ? ' focused' : ''}${isActive ? ' active' : ''} kind-${node.kind}`}
                 style={{ transform: `translateY(${vi.start}px)`, height: ROW_HEIGHT, paddingLeft: 4 + row.depth * 14 }}
                 onClick={() => setFocusId(node.id)}

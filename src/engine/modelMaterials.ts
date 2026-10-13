@@ -29,6 +29,8 @@ export interface SharedUniforms {
   uRvtEdge: { value: THREE.Color };
   uRvtStyle: { value: number };
   uRvtCutFill: { value: boolean };
+  /** Window-space depth bias that pulls the cut fill toward the viewer. */
+  uRvtCutBias: { value: number };
 }
 
 export function createSharedUniforms(): SharedUniforms {
@@ -42,6 +44,7 @@ export function createSharedUniforms(): SharedUniforms {
     uRvtEdge: { value: new THREE.Color('#000000') },
     uRvtStyle: { value: 0 },
     uRvtCutFill: { value: false },
+    uRvtCutBias: { value: 0 },
   };
 }
 
@@ -76,6 +79,7 @@ uniform vec3 uRvtCut;
 uniform vec3 uRvtEdge;
 uniform int uRvtStyle;
 uniform bool uRvtCutFill;
+uniform float uRvtCutBias;
 uniform int uRvtPass;
 uniform float uRvtBaseAlpha;
 flat varying vec4 vRvtState;
@@ -113,8 +117,10 @@ else if ((rvtFlags & 4u) != 0u) gl_FragColor.rgb = mix(gl_FragColor.rgb, uRvtHov
 #ifdef RVT_CUT
 // The cut fill is the inside (back faces) of a clipped solid, often
 // coplanar with something else (a wall's base on the slab top). Pull it
-// slightly toward the viewer so it reads as the cap at the cut.
-gl_FragDepth = gl_FragCoord.z - (rvtCutFace ? 0.0004 : 0.0);
+// toward the viewer by a couple of millimetres (uRvtCutBias, computed per
+// frame from the camera) so it wins that tie but never hides a real face,
+// even of a thin topping slab.
+gl_FragDepth = gl_FragCoord.z - (rvtCutFace ? uRvtCutBias : 0.0);
 #endif
 `;
 

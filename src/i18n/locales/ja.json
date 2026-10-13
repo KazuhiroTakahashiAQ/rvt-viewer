@@ -80,7 +80,12 @@
     "inEntireProject": "プロジェクト全体",
     "openView": "開く",
     "expand": "展開",
-    "collapse": "折りたたむ"
+    "collapse": "折りたたむ",
+    "selectLevelElements": "このレベルの要素を選択",
+    "hideLevelInView": "アクティブ ビューでこのレベルを非表示",
+    "showLevelInView": "アクティブ ビューでこのレベルを表示",
+    "showOnlyLevelInView": "アクティブ ビューでこのレベルのみ表示",
+    "showAllLevelsInView": "アクティブ ビューですべてのレベルを表示"
   },
   "ui": {
     "properties": "プロパティ",
@@ -350,7 +355,12 @@
     "halftone": "ハーフトーン",
     "visibleOf": "{{category}} を表示",
     "overrideColor": "サーフェス色を上書き",
-    "note": "設定はこのビューにのみ適用されます。"
+    "note": "設定はこのビューにのみ適用されます。",
+    "levels": "レベル",
+    "levelsLead": "チェックを外したレベルに属する要素をこのビューで非表示にします。",
+    "level": "レベル",
+    "elevation": "高さ ({{unit}})",
+    "elementCount": "要素数"
   },
   "filter": {
     "title": "フィルタ",

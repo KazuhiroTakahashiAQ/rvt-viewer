@@ -1469,6 +1469,10 @@ select {
   border-bottom: 1px solid var(--border);
 }
 
+.vg-row.vg-level-row {
+  grid-template-columns: 44px minmax(160px, 1fr) 140px 90px;
+}
+
 .vg-row > span {
   padding: 2px 6px;
 }

@@ -43,8 +43,13 @@ export interface CategoryOverride {
 
 export type TempMode = 'none' | 'hide' | 'isolate';
 
+/** Storey index of an element; UNASSIGNED_LEVEL for elements without a level. */
+export const UNASSIGNED_LEVEL = -1;
+
 export interface DisplayConfig {
   hiddenCategories: ReadonlySet<CategoryKey>;
+  /** Storey indices whose elements are hidden (UNASSIGNED_LEVEL included). */
+  hiddenLevels: ReadonlySet<number>;
   hiddenElements: ReadonlySet<number>;
   overrides: Partial<Record<CategoryKey, CategoryOverride>>;
   tempMode: TempMode;

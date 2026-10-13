@@ -18,7 +18,7 @@ import { FLAG_HALFTONE, FLAG_HOVER, FLAG_REVEALED, FLAG_SELECTED, FLAG_VISIBLE }
 import { ModelMesh } from './ModelMesh';
 import { type SharedUniforms, createSharedUniforms, setVisualStyle } from './modelMaterials';
 import { SectionBox } from './SectionBox';
-import type { DisplayConfig, ModelViewConfig, NavMode, SectionBoxState, ThemeConfig } from './types';
+import { type DisplayConfig, type ModelViewConfig, type NavMode, type SectionBoxState, type ThemeConfig, UNASSIGNED_LEVEL } from './types';
 import { ViewCube, type ViewCubeLabels } from './ViewCube';
 
 export interface SelectEvent {
@@ -29,6 +29,13 @@ export interface SelectEvent {
 export interface BoxSelectEvent {
   entities: number[];
   mode: 'replace' | 'add' | 'remove';
+}
+
+/** Per-entity lookups the viewer needs for display rules and picking. */
+export interface EntityMeta {
+  categoryOf: (entity: number) => CategoryKey | undefined;
+  /** Storey index, or UNASSIGNED_LEVEL. */
+  levelOf: (entity: number) => number;
 }
 
 export interface ViewerCallbacks {
@@ -45,6 +52,8 @@ const CLICK_SLOP = 4;
 const DOUBLE_MIDDLE_MS = 350;
 const ORBIT_SPEED = Math.PI / 420;
 const VIEWCUBE_SIZE = 116;
+/** How far (world metres) the cut fill is pulled toward the viewer. */
+const CUT_BIAS_METRES = 0.002;
 
 interface ViewMemory {
   pose: CameraPose;
@@ -76,6 +85,7 @@ export class Viewer {
 
   private model: ModelMesh | null = null;
   private categoryOf: (entity: number) => CategoryKey | undefined = () => undefined;
+  private levelOf: (entity: number) => number = () => UNASSIGNED_LEVEL;
   private view: ModelViewConfig | null = null;
   private memory = new Map<string, ViewMemory>();
   private display: DisplayConfig | null = null;
@@ -153,22 +163,23 @@ export class Viewer {
 
   // --- model ------------------------------------------------------------
 
-  async loadModel(glb: Uint8Array, entityCount: number, categoryOf: (entity: number) => CategoryKey | undefined): Promise<void> {
+  async loadModel(glb: Uint8Array, entityCount: number, meta: EntityMeta): Promise<void> {
     const mesh = await ModelMesh.fromGlb(glb, entityCount, this.uniforms);
     if (this.disposed) {
       mesh.dispose();
       return;
     }
-    this.setModel(mesh, categoryOf);
+    this.setModel(mesh, meta);
   }
 
-  setModel(model: ModelMesh | null, categoryOf: (entity: number) => CategoryKey | undefined): void {
+  setModel(model: ModelMesh | null, meta: EntityMeta): void {
     if (this.model) {
       this.scene.remove(this.model.root);
       this.model.dispose();
     }
     this.model = model;
-    this.categoryOf = categoryOf;
+    this.categoryOf = meta.categoryOf;
+    this.levelOf = meta.levelOf;
     this.memory.clear();
     this.selection.clear();
     this.hover = null;
@@ -336,7 +347,10 @@ export class Viewer {
     for (const entity of model.entityBoxes.keys()) {
       const cat = this.categoryOf(entity);
       const ov = cat ? display.overrides[cat] : undefined;
-      let hiddenByUser = (cat !== undefined && display.hiddenCategories.has(cat)) || display.hiddenElements.has(entity);
+      let hiddenByUser =
+        (cat !== undefined && display.hiddenCategories.has(cat)) ||
+        display.hiddenElements.has(entity) ||
+        display.hiddenLevels.has(this.levelOf(entity));
       if (display.tempMode === 'hide' && display.tempElements.has(entity)) hiddenByUser = true;
       if (display.tempMode === 'isolate' && !display.tempElements.has(entity)) hiddenByUser = true;
       const outOfRange = this.planMask !== null && !this.planMask.has(entity);
@@ -534,9 +548,21 @@ export class Viewer {
     this.sun.target.position.copy(this.rig.pose.target);
     this.sun.target.updateMatrixWorld();
     this.sectionBox.updateScale(this.worldPerPixel());
+    this.uniforms.uRvtCutBias.value = this.cutBias();
     this.renderer.render(this.scene, cam);
     this.viewCube.sync(q);
   };
+
+  /** CUT_BIAS_METRES expressed as a window-space depth offset for the active camera. */
+  private cutBias(): number {
+    const cam = this.rig.camera;
+    const range = Math.max(cam.far - cam.near, 1e-6);
+    if (this.rig.pose.projection === 'ortho') return CUT_BIAS_METRES / range;
+    // Perspective depth is z_w = f(n-d)… ; its slope at the target distance d
+    // is f·n / (d²·(f−n)).
+    const d = Math.max(this.rig.pose.distance, cam.near);
+    return (CUT_BIAS_METRES * cam.far * cam.near) / (d * d * range);
+  }
 
   private worldPerPixel(): number {
     return (2 * this.rig.halfHeight) / Math.max(this.height, 1);
