@@ -376,9 +376,11 @@ dependencies = [
 name = "rvt-viewer-wasm"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "rvt",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "wasm-bindgen",
 ]
 

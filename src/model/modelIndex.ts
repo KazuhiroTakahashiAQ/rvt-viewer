@@ -33,20 +33,22 @@ export interface ElementRecord {
 }
 
 /**
- * `approx`: the record's bounding box standing in for an undecoded shape;
- * `savedMesh`: the mesh Revit saved for display; `decoded`: everything else
- * (decoded profiles, and boxes rvt-rs proved to be the exact shape).
+ * `approx`: a box standing in for an undecoded shape (the record's bounding
+ * box, or for a family instance turned off the model's axes the rectangle at
+ * its angle that box bounds); `savedMesh`: the mesh Revit saved for display;
+ * `decoded`: everything else (decoded profiles, and boxes rvt-rs proved to be
+ * the exact shape).
  */
 export type BodyKind = 'decoded' | 'approx' | 'savedMesh';
 
-const BBOX_BODY = 'partition_element_record_bbox';
+const BOX_BODIES = new Set(['partition_element_record_bbox', 'partition_family_instance_turned_box']);
 const SAVED_MESH_BODY = 'saved_graphics_mesh';
 
 export function bodyKind(set: PropertySet | undefined): BodyKind {
   const source = textOf(findProperty(set, 'BodySource'));
   if (source === SAVED_MESH_BODY) return 'savedMesh';
   const exact = findProperty(set, 'ProfileResolved');
-  if (source === BBOX_BODY && !(exact?.kind === 'Boolean' && exact.value)) return 'approx';
+  if (source !== null && BOX_BODIES.has(source) && !(exact?.kind === 'Boolean' && exact.value)) return 'approx';
   return 'decoded';
 }
 

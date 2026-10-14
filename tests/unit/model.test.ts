@@ -84,6 +84,7 @@ describe('buildModelIndex', () => {
     expect(
       bodyKind(set([text('BodySource', 'partition_element_record_bbox'), { name: 'ProfileResolved', value: { kind: 'Boolean', value: true } }])),
     ).toBe('decoded');
+    expect(bodyKind(set([text('BodySource', 'partition_family_instance_turned_box')]))).toBe('approx');
     expect(bodyKind(set([text('BodySource', 'saved_graphics_mesh')]))).toBe('savedMesh');
     expect(bodyKind(set([text('BodySource', 'partition_element_record_join_trimmed')]))).toBe('decoded');
     expect(bodyKind(undefined)).toBe('decoded');

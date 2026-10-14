@@ -4,7 +4,8 @@
 //! (same names, same JS values in and out), copied here so one module can
 //! also expose [`attach_saved_meshes`]: rvt-rs can draw doors, windows and
 //! other loadable families from the meshes Revit saved for display
-//! (`rvt-gltf --saved-meshes`), but rvt-wasm does not bind it.
+//! (`rvt-gltf --saved-meshes`), but rvt-wasm does not bind it. [`saved_meshes`]
+//! extends it to the boxes it leaves.
 //!
 //! No network APIs: CI checks the compiled module's imports.
 
@@ -12,13 +13,15 @@ use rvt::RevitFile;
 use rvt::ifc::{
     ExportQualityMode, IfcModel, RvtDocExporter,
     gltf::model_to_glb,
-    saved_meshes::{self, SavedMeshReport},
+    saved_meshes::SavedMeshReport,
     scene_graph::{SceneNode, Schedule, build_scene_graph, build_schedule, distinct_ifc_types},
     sheet::{SheetOptions, render_plan_svg},
     step_writer::write_step,
 };
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
+
+pub mod saved_meshes;
 
 fn err_str<E: std::fmt::Display>(e: E) -> JsValue {
     JsValue::from_str(&e.to_string())
@@ -73,9 +76,9 @@ struct SavedMeshes {
     report: SavedMeshReport,
 }
 
-/// Replace the bounding-box bodies of `model` (from
-/// `openRvtBytesWithDiagnosticsMode` on the same `bytes`) with the meshes
-/// Revit saved for display, where the file holds them. Returns
+/// Replace the box bodies of `model` (from `openRvtBytesWithDiagnosticsMode`
+/// on the same `bytes`) with the meshes Revit saved for display, where the
+/// file holds them ([`saved_meshes::attach`]). Returns
 /// `{ model, report: { candidates, replaced, triangles } }`, `model` null
 /// when nothing was replaced; entity indices are unchanged.
 #[wasm_bindgen(js_name = attachSavedMeshes)]

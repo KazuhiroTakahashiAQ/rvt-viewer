@@ -15,6 +15,8 @@ rvt = { path = "../vendor/rvt-rs" }
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
 
 # Standalone: not a member of vendor/rvt-rs' workspace.
 [workspace]

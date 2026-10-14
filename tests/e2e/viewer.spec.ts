@@ -197,6 +197,18 @@ test.describe('with a sample model', () => {
       await expect(page.locator('.prop-row', { hasText: '形状の取得元' })).toContainText('保存済み表示メッシュ');
       await shot(page, '12-doors');
     }
+    // RPC planting and entourage: placeholder meshes rvt-rs does not decode, often turned off the axes.
+    await page.getByRole('searchbox', { name: 'プロジェクト ブラウザを検索' }).fill('RPC');
+    const rpc = page.locator('.tree-row.kind-family', { hasText: 'RPC' });
+    if (replaced! > 0 && (await rpc.count()) > 0) {
+      await rpc.first().click({ button: 'right' });
+      await page.getByRole('menuitem', { name: 'すべてのインスタンスを選択' }).hover();
+      await page.getByRole('menuitem', { name: 'プロジェクト全体' }).click();
+      const source = page.locator('.prop-row', { hasText: '形状の取得元' });
+      if (!(await source.isVisible())) await page.locator('.prop-group-header', { hasText: '読込情報' }).click();
+      await expect(source).toContainText('保存済み表示メッシュ');
+      await shot(page, '13-rpc');
+    }
     expect(errors).toEqual([]);
   });
 
