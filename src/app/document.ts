@@ -63,7 +63,7 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
       glb: ready.glb,
       hasGeometry,
       savedMeshes: { status: savedMeshes ? 'pending' : 'off', report: null },
-      refinedGlb: null,
+      refinedBody: null,
     });
   } catch (err) {
     if (seq !== openSeq) return;
@@ -84,7 +84,9 @@ function savedMeshesDone(refined: RefinedPayload | null, report: SavedMeshReport
   store.savedMeshesDone(
     'done',
     report,
-    refined ? { model: refined.model, index: buildModelIndex(refined.model), glb: refined.glb } : undefined,
+    refined
+      ? { model: refined.model, index: buildModelIndex(refined.model), glb: refined.glb, materials: refined.materials }
+      : undefined,
   );
 }
 

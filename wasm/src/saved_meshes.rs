@@ -1,20 +1,26 @@
-//! Saved display meshes for more boxes than `rvt::ifc::saved_meshes::attach`
-//! replaces.
+//! Bodies from the meshes Revit saved for display, for more boxes than
+//! `rvt::ifc::saved_meshes::attach` replaces.
 //!
 //! `attach` replaces a body that is its element record's bounding box with
-//! the mesh Revit saved for the element. It leaves two kinds of box:
+//! the element's saved graphics as rvt-rs decodes them. [`attach`] here does
+//! the same with rvt-rs's decoder, and besides:
 //!
 //! - Family instances turned off the model's axes, which rvt-rs draws as the
 //!   rectangle at their angle that the record box bounds
-//!   (`partition_family_instance_turned_box`, RE-87): no less approximate
-//!   than the record box, and they have saved meshes the same way.
-//! - Elements whose saved graphics are a `GPolyMesh` over a faceted topology
-//!   other than `FacetedTopology0`, which rvt-rs's decoder rejects
-//!   ("unsupported faceted topology"). RPC planting, people and cars draw
-//!   their placeholder mesh this way, from the family type's shared symbol:
-//!   `FacetedTopology8`, the same points and triangles plus a normal and an
-//!   edge visibility flag per facet.
+//!   (`partition_family_instance_turned_box`, RE-87), are replaced too.
+//! - Where rvt-rs's decoder rejects part of an element's graphics, the
+//!   element is decoded again by [`crate::brep::Decoder`]: the curved faces
+//!   it rejects (cones, cut cylinders, ruled surfaces to a point, ellipse
+//!   and spline profiles: pipe and duct fittings, furniture, railings), and
+//!   `GPolyMesh`es over faceted topologies other than `FacetedTopology0`
+//!   (RPC planting, people and cars draw their placeholder that way).
+//! - Two fail-closed checks of rvt-rs's traversal are relaxed (see
+//!   [`relax`]).
+//! - A body with a transparent face (a window's glass) is drawn in the
+//!   materials Revit saved for its faces ([`MaterialRun`]); the others keep
+//!   the element's colour.
 
+use crate::brep::{self, Decoder, P3};
 use rvt::RevitFile;
 use rvt::ifc::IfcModel;
 use rvt::ifc::entities::{BrepTriangle, IfcEntity, PropertyValue, SolidShape};
@@ -23,60 +29,138 @@ use rvt::ifc::saved_meshes::{SAVED_MESH_BODY_SOURCE, SavedMeshReport};
 use rvt::native_document::{self, Options, Record};
 use rvt::native_graphics_traversal::{GraphicsTransform, select_graphics_with_resolver_at_detail};
 use rvt::native_parameters::ObjectGraph;
-use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use rvt::native_saved_materials::Resolver;
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-/// `attach`'s detail level: Revit's fine representation.
+/// rvt-rs's detail level for saved meshes: Revit's fine representation.
 const DETAIL_LEVEL: i64 = 3;
 
-/// Saved-graphics channel of `native_document`.
+/// Saved-graphics and material channels of `native_document`.
 const GRAPHICS_CHANNEL: u64 = 103;
+const MATERIAL_CHANNEL: u64 = 102;
 
-/// [`rvt::ifc::saved_meshes::attach`], also for turned family instances, then
-/// the faceted meshes it rejects for the boxes left.
-pub fn attach(rf: &mut RevitFile, model: &mut IfcModel) -> anyhow::Result<SavedMeshReport> {
-    // `attach` takes a box by its BodySource: relabel turned boxes as record
-    // boxes for it, and back where it left them.
-    let turned: Vec<usize> = (0..model.entities.len())
-        .filter(|&i| {
-            set_body_source(model, i, INSTANCE_TURNED_BODY_SOURCE, RECORD_BBOX_BODY_SOURCE)
-        })
-        .collect();
-    let attached = rvt::ifc::saved_meshes::attach(rf, model);
-    for &i in &turned {
-        set_body_source(model, i, RECORD_BBOX_BODY_SOURCE, INSTANCE_TURNED_BODY_SOURCE);
-    }
-    let mut report = attached?;
-    let left = boxed_bodies(model);
-    if !left.is_empty() {
-        let (replaced, triangles) = attach_faceted(rf, model, &left)?;
-        report.replaced += replaced;
-        report.triangles += triangles;
-    }
-    Ok(report)
+/// A run of an element's triangles in one material, in the order of its
+/// `TriangulatedFaceSet`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MaterialRun {
+    pub triangles: usize,
+    /// sRGB 0..1; `None` where Revit's material is not known (the element's
+    /// own colour then).
+    pub color: Option<[f32; 3]>,
+    pub opacity: f32,
 }
 
-/// Set entity `index`'s BodySource to `to` where it is `from`.
-fn set_body_source(model: &mut IfcModel, index: usize, from: &str, to: &str) -> bool {
-    let IfcEntity::BuildingElement {
-        property_set: Some(set),
-        ..
-    } = &mut model.entities[index]
-    else {
-        return false;
-    };
-    let Some(property) = set
-        .properties
-        .iter_mut()
-        .find(|p| p.name == "BodySource" && matches!(&p.value, PropertyValue::Text(t) if t == from))
-    else {
-        return false;
-    };
-    property.value = PropertyValue::Text(to.into());
-    true
+pub struct Attached {
+    pub report: SavedMeshReport,
+    /// Entity index → its runs, for the bodies with a transparent face.
+    pub materials: BTreeMap<usize, Vec<MaterialRun>>,
+    /// Why faces and objects were left out, with counts.
+    pub failures: BTreeMap<String, usize>,
 }
 
-/// Elements still drawn as a box `attach` would take (or a turned one),
+/// Replace the box bodies of `model` with the meshes Revit saved for display.
+pub fn attach(rf: &mut RevitFile, model: &mut IfcModel) -> anyhow::Result<Attached> {
+    let boxed = boxed_bodies(model);
+    let mut attached = Attached {
+        report: SavedMeshReport {
+            candidates: boxed.len(),
+            ..Default::default()
+        },
+        materials: BTreeMap::new(),
+        failures: BTreeMap::new(),
+    };
+    if boxed.is_empty() {
+        return Ok(attached);
+    }
+    let mut records = graphics_records(rf, boxed.keys().copied().collect())?;
+    for graph in records.values_mut().filter_map(|r| r.graph.as_mut()) {
+        relax(graph);
+    }
+    let materials = material_resolver(rf)?;
+    let resolver = |id: u64| records.get(&id).and_then(|r| r.graph.as_ref());
+    let mut decoders: HashMap<u64, Decoder> = HashMap::new();
+    let mut meshes = Vec::new();
+    for (&id, &index) in &boxed {
+        let Some(graph) = resolver(id) else {
+            continue;
+        };
+        let mut mesh = ElementMesh::default();
+        let upstream = rvt::native_saved_mesh::graphics_with_resolver_at_detail(graph, &resolver, DETAIL_LEVEL);
+        if upstream.diagnostics.is_empty() {
+            for p in &upstream.primitives {
+                let key = (p.source_owner_id, p.face_tag, p.render_style_id, p.material_id);
+                mesh.add(&p.vertices, &p.triangles, key);
+            }
+        } else {
+            let selection = select_graphics_with_resolver_at_detail(graph, &resolver, DETAIL_LEVEL);
+            for selected in &selection.selected {
+                let owner = selected.source_owner_id.unwrap_or(id);
+                let Some(source) = resolver(owner) else {
+                    continue;
+                };
+                let decoder = decoders.entry(owner).or_insert_with(|| Decoder::new(source));
+                for part in decoder.object(selected.object_index).iter() {
+                    let key = (selected.source_owner_id, part.face_tag, part.render_style_id, part.material_id);
+                    let vertices: Vec<P3> = part.vertices.iter().map(|&p| place(selected.world_transform, p)).collect();
+                    if mirrors(selected.world_transform) {
+                        let flipped: Vec<[u32; 3]> = part.triangles.iter().map(|&[a, b, c]| [a, c, b]).collect();
+                        mesh.add(&vertices, &flipped, key);
+                    } else {
+                        mesh.add(&vertices, &part.triangles, key);
+                    }
+                }
+            }
+            // What rvt-rs did decode, where this decoder found nothing more.
+            if mesh.triangle_count() == 0 {
+                for p in &upstream.primitives {
+                    let key = (p.source_owner_id, p.face_tag, p.render_style_id, p.material_id);
+                    mesh.add(&p.vertices, &p.triangles, key);
+                }
+            }
+        }
+        if mesh.triangle_count() > 0 {
+            meshes.push((index, id, mesh));
+        }
+    }
+    let looks = Looks::new(&materials, &meshes);
+    for (index, id, mesh) in meshes {
+        attached.report.replaced += 1;
+        attached.report.triangles += mesh.triangle_count();
+        if let Some(runs) = set_mesh(model, index, mesh, |key| looks.of(id, key)) {
+            attached.materials.insert(index, runs);
+        }
+    }
+    for decoder in decoders.values() {
+        for (reason, n) in &decoder.failures {
+            *attached.failures.entry(reason.clone()).or_default() += n;
+        }
+    }
+    Ok(attached)
+}
+
+/// Relax two fail-closed checks of rvt-rs's graphics traversal, which drop
+/// a whole element:
+///
+/// - an instance with target restrictions (`m_forbiddenTarget`): the root
+///   instances of furniture carry them and Revit draws that furniture in 3D;
+/// - a `GBiFlipControl`, the flip arrows of a railing: drawn as a point,
+///   which the traversal leaves out as it does curves.
+fn relax(graph: &mut ObjectGraph) {
+    for object in &mut graph.objects {
+        match object.class_name.as_str() {
+            "GInstance" => {
+                if let Some(targets) = object.fields.pointer_mut("/m_forbiddenTarget/m_targets") {
+                    *targets = 0.into();
+                }
+            }
+            "GBiFlipControl" => object.class_name = "GPoint".into(),
+            _ => {}
+        }
+    }
+}
+
+/// Elements drawn as a box rvt-rs's `attach` would take, or a turned one,
 /// by ElementId, under the same conditions: not a stair or curtain wall drawn
 /// by its parts, placed, and the only entity carrying its ElementId.
 fn boxed_bodies(model: &IfcModel) -> BTreeMap<u64, usize> {
@@ -123,42 +207,6 @@ fn boxed_bodies(model: &IfcModel) -> BTreeMap<u64, usize> {
         .collect()
 }
 
-/// Replace the bodies of `boxed` (ElementId → entity) whose saved graphics
-/// hold faceted meshes rvt-rs does not decode. Returns `(replaced, triangles)`.
-fn attach_faceted(
-    rf: &mut RevitFile,
-    model: &mut IfcModel,
-    boxed: &BTreeMap<u64, usize>,
-) -> anyhow::Result<(usize, usize)> {
-    let records = graphics_records(rf, boxed.keys().copied().collect())?;
-    let resolver = |id: u64| records.get(&id).and_then(|r| r.graph.as_ref());
-    let (mut replaced, mut triangles) = (0, 0);
-    for (id, &index) in boxed {
-        let Some(graph) = resolver(*id) else {
-            continue;
-        };
-        let selection = select_graphics_with_resolver_at_detail(graph, &resolver, DETAIL_LEVEL);
-        let mut mesh = Mesh::default();
-        for selected in &selection.selected {
-            let source = match selected.source_owner_id {
-                None => graph,
-                Some(owner) => match resolver(owner) {
-                    Some(source) => source,
-                    None => continue,
-                },
-            };
-            mesh.add_faceted(source, selected.object_index, selected.world_transform);
-        }
-        if mesh.triangles.is_empty() {
-            continue;
-        }
-        replaced += 1;
-        triangles += mesh.triangles.len();
-        set_mesh(model, index, mesh);
-    }
-    Ok((replaced, triangles))
-}
-
 /// The saved-graphics records of `ids`, with the shared symbols their
 /// instances draw (`native_saved_scene::extract_at_detail`'s closure).
 fn graphics_records(
@@ -189,7 +237,9 @@ fn graphics_records(
                 continue;
             };
             for object in graph.objects.iter().filter(|o| o.class_name == "InstanceInfo") {
-                let symbol = identifier(&object.fields["m_symbolId"]).filter(|id| *id > 0);
+                let symbol = brep::identifier(&object.fields["m_symbolId"])
+                    .and_then(|id| u64::try_from(id).ok())
+                    .filter(|id| *id > 0);
                 if let Some(symbol) = symbol.filter(|id| attempted.insert(*id)) {
                     wanted.insert(symbol);
                 }
@@ -199,103 +249,122 @@ fn graphics_records(
     Ok(records)
 }
 
-/// A saved ElementId: a number, or one under `m_id` / `m_id64`.
-fn identifier(value: &Value) -> Option<u64> {
-    if let Some(n) = value.as_i64() {
-        return u64::try_from(n).ok();
-    }
-    ["m_id", "m_id64"]
-        .iter()
-        .find_map(|key| value.get(key))
-        .and_then(identifier)
+/// The document's saved materials, as `native_saved_scene` reads them.
+fn material_resolver(rf: &mut RevitFile) -> anyhow::Result<Resolver> {
+    let mut resolver = Resolver::default_viewport_profile();
+    let mut options = Options {
+        max_graph_values: 1_000_000,
+        max_graph_objects: 1_000_000,
+        ..Default::default()
+    };
+    options.channels = BTreeSet::from([MATERIAL_CHANNEL]);
+    native_document::extract(rf, &options, |record| resolver.ingest(&record))?;
+    Ok(resolver)
 }
 
-/// Triangles in document feet.
+/// What selects a face's material besides its element: the shared symbol
+/// it is drawn from, its tag, render style and material.
+type FaceKey = (Option<u64>, i64, i64, Option<i64>);
+
+/// A face's colour and opacity, quantised: `None` colour where unknown.
+type Look = (Option<[u8; 3]>, u8);
+
+/// The looks of the faces of the replaced bodies. Where an instance's face
+/// resolves to no material of its own, it takes the one another instance of
+/// the same symbol resolves the same face to (the material lookup goes by
+/// the instance, and finds the type's materials for some instances only).
+struct Looks {
+    own: HashMap<(u64, FaceKey), Look>,
+    shared: HashMap<FaceKey, Look>,
+}
+
+impl Looks {
+    fn new(resolver: &Resolver, meshes: &[(usize, u64, ElementMesh)]) -> Self {
+        let mut own = HashMap::new();
+        let mut shared = HashMap::new();
+        for (_, id, mesh) in meshes {
+            for &key in mesh.by_key.keys() {
+                let look = *own.entry((*id, key)).or_insert_with(|| resolve(resolver, *id, key));
+                if key.0.is_some() && look.0.is_some() {
+                    shared.entry(key).or_insert(look);
+                }
+            }
+        }
+        Self { own, shared }
+    }
+
+    fn of(&self, owner: u64, key: FaceKey) -> Look {
+        let own = self.own.get(&(owner, key)).copied().unwrap_or((None, 255));
+        match own.0 {
+            Some(_) => own,
+            None => self.shared.get(&key).copied().unwrap_or(own),
+        }
+    }
+}
+
+fn resolve(resolver: &Resolver, owner: u64, (source, face_tag, style, material): FaceKey) -> Look {
+    let Some(m) = resolver.resolve(owner, source, face_tag, style, material) else {
+        return (None, 255);
+    };
+    // The viewport default stands for no material of its own.
+    let color = m.material_id.map(|_| m.base_color).map(|c| [c[0], c[1], c[2]].map(unit_byte));
+    let opacity = unit_byte(m.saved_opacity.unwrap_or(1.0));
+    (color, opacity)
+}
+
+fn unit_byte(v: f64) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// An element's triangles in document feet, by what selects their material.
 #[derive(Default)]
-struct Mesh {
-    vertices: Vec<[f64; 3]>,
-    triangles: Vec<[u32; 3]>,
+struct ElementMesh {
+    vertices: Vec<P3>,
+    by_key: BTreeMap<FaceKey, Vec<[u32; 3]>>,
 }
 
-impl Mesh {
-    /// Add `graph`'s object `index` placed by `transform`, where it is a
-    /// `GPolyMesh` over a faceted topology rvt-rs does not decode.
-    fn add_faceted(&mut self, graph: &ObjectGraph, index: usize, transform: GraphicsTransform) {
-        let object = &graph.objects[index];
-        if object.class_name != "GPolyMesh" {
-            return;
-        }
-        let Ok(Some(topology)) =
-            rvt::native_saved_mesh::pointer(graph, index, &object.fields["m_pFacetedTopology"])
-        else {
-            return;
-        };
-        let topology = &graph.objects[topology];
-        // FacetedTopology0 is rvt-rs's: an element it left had none decodable.
-        if !topology.class_name.starts_with("FacetedTopology")
-            || topology.class_name == "FacetedTopology0"
-        {
-            return;
-        }
-        let Some(points) = topology.fields["m_pointsArr"]
-            .as_array()
-            .and_then(|points| points.iter().map(point).collect::<Option<Vec<_>>>())
-        else {
-            return;
-        };
-        let Some(facets) = topology.fields["m_facetsArr"].as_array() else {
-            return;
-        };
-        let m = transform;
-        let place = |p: [f64; 3]| -> [f64; 3] {
-            std::array::from_fn(|i| m[i][3] + (0..3).map(|j| m[i][j] * p[j]).sum::<f64>())
-        };
-        let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-        if !(det.is_finite() && det.abs() > 1e-12) {
-            return;
-        }
+impl ElementMesh {
+    fn add(&mut self, vertices: &[P3], triangles: &[[u32; 3]], key: FaceKey) {
         let base = self.vertices.len() as u32;
-        let placed: Vec<[f64; 3]> = points.into_iter().map(place).collect();
-        if !placed.iter().flatten().all(|v| v.is_finite()) {
+        let count = vertices.len();
+        if !vertices.iter().flatten().all(|v| v.is_finite()) {
             return;
         }
-        let count = placed.len();
-        let mut triangles = Vec::new();
-        for facet in facets {
-            let Some(corners) = facet.as_array().and_then(|a| {
-                a.iter()
-                    .map(|v| v.as_u64().map(|v| v as usize))
-                    .collect::<Option<Vec<_>>>()
-            }) else {
-                return;
-            };
-            if corners.len() < 3 || corners.iter().any(|&v| v >= count) {
-                return;
-            }
-            // A polygon as a fan; a mirroring transform flips the winding.
-            for k in 1..corners.len() - 1 {
-                let (a, b, c) = (corners[0], corners[k], corners[k + 1]);
-                let (b, c) = if det < 0.0 { (c, b) } else { (b, c) };
-                triangles.push([base + a as u32, base + b as u32, base + c as u32]);
-            }
-        }
-        self.vertices.extend(placed);
-        self.triangles.extend(triangles);
+        self.vertices.extend_from_slice(vertices);
+        self.by_key.entry(key).or_default().extend(
+            triangles
+                .iter()
+                .filter(|t| t.iter().all(|&v| (v as usize) < count))
+                .map(|t| t.map(|v| base + v)),
+        );
+    }
+
+    fn triangle_count(&self) -> usize {
+        self.by_key.values().map(Vec::len).sum()
     }
 }
 
-fn point(value: &Value) -> Option<[f64; 3]> {
-    let a = value.as_array()?;
-    if a.len() != 3 {
-        return None;
-    }
-    Some([a[0].as_f64()?, a[1].as_f64()?, a[2].as_f64()?])
+fn place(m: GraphicsTransform, p: P3) -> P3 {
+    std::array::from_fn(|i| m[i][3] + (0..3).map(|j| m[i][j] * p[j]).sum::<f64>())
 }
 
-/// Draw entity `index` from `mesh`, in its placement's frame as `attach` does.
-fn set_mesh(model: &mut IfcModel, index: usize, mesh: Mesh) {
+fn mirrors(m: GraphicsTransform) -> bool {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    det < 0.0
+}
+
+/// Draw entity `index` from `mesh`, in its placement's frame as rvt-rs's
+/// `attach` does, its triangles in runs of one look. Returns the runs where
+/// one is transparent: those bodies are drawn in their faces' colours, the
+/// others keep the element's.
+fn set_mesh(
+    model: &mut IfcModel,
+    index: usize,
+    mesh: ElementMesh,
+    look: impl Fn(FaceKey) -> Look,
+) -> Option<Vec<MaterialRun>> {
     let IfcEntity::BuildingElement {
         location_feet: Some(origin),
         rotation_radians,
@@ -304,7 +373,7 @@ fn set_mesh(model: &mut IfcModel, index: usize, mesh: Mesh) {
         ..
     } = &mut model.entities[index]
     else {
-        return;
+        return None;
     };
     let (sin, cos) = (-rotation_radians.unwrap_or(0.0)).sin_cos();
     let vertices = mesh
@@ -315,7 +384,23 @@ fn set_mesh(model: &mut IfcModel, index: usize, mesh: Mesh) {
             [dx * cos - dy * sin, dx * sin + dy * cos, p[2] - origin[2]]
         })
         .collect();
-    let triangles = mesh.triangles.iter().map(|t| BrepTriangle(t[0], t[1], t[2])).collect();
+    let mut by_look: BTreeMap<Look, Vec<&[u32; 3]>> = BTreeMap::new();
+    for (&key, list) in &mesh.by_key {
+        by_look.entry(look(key)).or_default().extend(list);
+    }
+    let mut triangles = Vec::new();
+    let mut runs = Vec::new();
+    for (look, list) in &by_look {
+        if list.is_empty() {
+            continue;
+        }
+        triangles.extend(list.iter().map(|t| BrepTriangle(t[0], t[1], t[2])));
+        runs.push(MaterialRun {
+            triangles: list.len(),
+            color: look.0.map(|c| c.map(|v| f32::from(v) / 255.0)),
+            opacity: f32::from(look.1) / 255.0,
+        });
+    }
     *solid_shape = Some(SolidShape::TriangulatedFaceSet {
         vertices_feet: vertices,
         triangles,
@@ -325,4 +410,5 @@ fn set_mesh(model: &mut IfcModel, index: usize, mesh: Mesh) {
             property.value = PropertyValue::Text(SAVED_MESH_BODY_SOURCE.into());
         }
     }
+    runs.iter().any(|r| r.opacity < 1.0).then_some(runs)
 }

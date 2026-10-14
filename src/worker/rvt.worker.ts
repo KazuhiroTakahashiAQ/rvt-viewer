@@ -21,6 +21,7 @@ import init, {
   scheduleCsv,
 } from '../wasm/pkg/rvt.js';
 import type {
+  BodyMaterials,
   ExportDiagnostics,
   FileMetadata,
   IfcModel,
@@ -38,6 +39,19 @@ const send = (msg: FromWorker, transfer: Transferable[] = []): void => {
 };
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * The model as the page needs it: bodies only as present or not (the page
+ * draws the GLB), so that posting a model of millions of triangles does not
+ * stall it. The worker keeps the whole model for the exports.
+ */
+function forPage(model: IfcModel): IfcModel {
+  return {
+    ...model,
+    entities: model.entities.map((e) => ('solid_shape' in e && e.solid_shape ? { ...e, solid_shape: true } : e)),
+    representation_maps: [],
+  };
+}
 
 function tryOr<T>(fn: () => T, fallback: T): T {
   try {
@@ -76,7 +90,7 @@ async function open(bytes: Uint8Array, savedMeshes: boolean): Promise<void> {
   // The GLB is copied so the worker keeps its own copy for "export glTF".
   const glbCopy = glb.slice();
   send(
-    { type: 'ready', model, diagnostics: result.diagnostics, scene, types, glb: glbCopy, schedule },
+    { type: 'ready', model: forPage(model), diagnostics: result.diagnostics, scene, types, glb: glbCopy, schedule },
     [glbCopy.buffer as ArrayBuffer],
   );
 
@@ -91,7 +105,11 @@ async function open(bytes: Uint8Array, savedMeshes: boolean): Promise<void> {
 function refine(bytes: Uint8Array): void {
   if (!model) return;
   try {
-    const result = attachSavedMeshes(bytes, model) as { model: IfcModel | null; report: SavedMeshReport };
+    const result = attachSavedMeshes(bytes, model) as {
+      model: IfcModel | null;
+      report: SavedMeshReport;
+      materials: BodyMaterials[];
+    };
     if (!result.model) {
       send({ type: 'refined', refined: null, report: result.report });
       return;
@@ -100,7 +118,11 @@ function refine(bytes: Uint8Array): void {
     glb = modelToGlb(model);
     const glbCopy = glb.slice();
     send(
-      { type: 'refined', refined: { model, glb: glbCopy, report: result.report }, report: result.report },
+      {
+        type: 'refined',
+        refined: { model: forPage(model), glb: glbCopy, materials: result.materials, report: result.report },
+        report: result.report,
+      },
       [glbCopy.buffer as ArrayBuffer],
     );
   } catch (err) {

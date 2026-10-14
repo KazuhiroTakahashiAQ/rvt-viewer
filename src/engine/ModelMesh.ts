@@ -3,11 +3,14 @@
  * handful of merged meshes — one per material — plus one merged edge
  * LineSegments. Per-element state lives in EntityState textures; picking
  * uses a BVH over the merged triangles and maps hits back to entities.
+ * A saved-mesh body drawn in several of Revit's materials (a window's frame
+ * and glass) is split into its material runs first.
  */
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
+import type { BodyMaterials, MaterialRun } from '../wasm/types';
 import { EntityState } from './EntityState';
 import { type SharedUniforms, createEdgeMaterial, createFaceMaterial } from './modelMaterials';
 
@@ -44,20 +47,35 @@ export class ModelMesh {
     this.root.name = 'rvt-model';
   }
 
-  static async fromGlb(glb: Uint8Array, entityCount: number, uniforms: SharedUniforms): Promise<ModelMesh> {
+  static async fromGlb(
+    glb: Uint8Array,
+    entityCount: number,
+    uniforms: SharedUniforms,
+    materials: BodyMaterials[] = [],
+  ): Promise<ModelMesh> {
     const model = new ModelMesh(entityCount);
     const buffer = glb.buffer.slice(glb.byteOffset, glb.byteOffset + glb.byteLength) as ArrayBuffer;
     const gltf = await new GLTFLoader().parseAsync(buffer, '');
     gltf.scene.updateMatrixWorld(true);
-    model.build(gltf.scene, uniforms);
+    model.build(gltf.scene, uniforms, new Map(materials.map((m) => [m.entity, m.runs])));
     disposeScene(gltf.scene);
     return model;
   }
 
-  private build(scene: THREE.Object3D, uniforms: SharedUniforms): void {
+  private build(scene: THREE.Object3D, uniforms: SharedUniforms, runs: Map<number, MaterialRun[]>): void {
     const batches = new Map<string, Batch>();
     const edgeCache = new Map<string, Float32Array>();
     const edgeChunks: { positions: Float32Array; matrix: THREE.Matrix4; entity: number }[] = [];
+    const parts: THREE.BufferGeometry[] = [];
+    const add = (color: THREE.Color, opacity: number, item: SourceMesh) => {
+      const key = `${color.getHexString()}-${opacity.toFixed(3)}`;
+      let batch = batches.get(key);
+      if (!batch) {
+        batch = { color, opacity, items: [] };
+        batches.set(key, batch);
+      }
+      batch.items.push(item);
+    };
 
     scene.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
@@ -69,18 +87,21 @@ export class ModelMesh {
         | undefined;
       const color = material?.color?.clone() ?? new THREE.Color(0xb2b4b8);
       const opacity = material?.transparent ? (material.opacity ?? 1) : 1;
-      const key = `${color.getHexString()}-${opacity.toFixed(3)}`;
-      let batch = batches.get(key);
-      if (!batch) {
-        batch = { color, opacity, items: [] };
-        batches.set(key, batch);
-      }
       const matrix = mesh.matrixWorld.clone();
-      batch.items.push({ geometry: mesh.geometry, matrix, entity });
+      const split = runs.has(entity) ? splitByRuns(mesh.geometry, runs.get(entity)!) : null;
+      if (split) {
+        for (const part of split) {
+          parts.push(part.geometry);
+          const own = part.color ? new THREE.Color().setRGB(...part.color, THREE.SRGBColorSpace) : color;
+          add(own, part.opacity < 1 ? part.opacity : opacity, { geometry: part.geometry, matrix, entity });
+        }
+      } else {
+        add(color, opacity, { geometry: mesh.geometry, matrix, entity });
+      }
 
       let edges = edgeCache.get(mesh.geometry.uuid);
       if (!edges) {
-        const eg = new THREE.EdgesGeometry(mesh.geometry, EDGE_THRESHOLD_DEG);
+        const eg = new THREE.EdgesGeometry(frontHalf(mesh.geometry) ?? mesh.geometry, EDGE_THRESHOLD_DEG);
         edges = eg.getAttribute('position').array as Float32Array;
         eg.dispose();
         edgeCache.set(mesh.geometry.uuid, edges);
@@ -91,6 +112,7 @@ export class ModelMesh {
     const volumeCache = new Map<string, number>();
     for (const batch of batches.values()) this.buildBatch(batch, uniforms, volumeCache);
     this.buildEdges(edgeChunks, uniforms);
+    for (const part of parts) part.dispose();
   }
 
   private buildBatch(batch: Batch, uniforms: SharedUniforms, volumeCache: Map<string, number>): void {
@@ -268,6 +290,73 @@ export function signedVolume(geometry: THREE.BufferGeometry, cache?: Map<string,
   volume /= 6;
   const result = Math.abs(volume) < 1e-12 ? 1 : volume;
   cache?.set(geometry.uuid, result);
+  return result;
+}
+
+/**
+ * The first half of a face set rvt-rs wrote two-sided (every triangle, then
+ * the same reversed), for edge finding: half the work, and each crease once.
+ * Null for any other geometry.
+ */
+export function frontHalf(geometry: THREE.BufferGeometry): THREE.BufferGeometry | null {
+  const index = geometry.index;
+  if (!index || index.count === 0 || index.count % 6 !== 0) return null;
+  const half = index.count / 2;
+  const ids = index.array;
+  for (let i = 0; i < half; i += 3) {
+    if (ids[half + i] !== ids[i] || ids[half + i + 1] !== ids[i + 2] || ids[half + i + 2] !== ids[i + 1]) return null;
+  }
+  const front = new THREE.BufferGeometry();
+  front.setAttribute('position', geometry.getAttribute('position'));
+  front.setIndex(new THREE.BufferAttribute(ids.slice(0, half), 1));
+  return front;
+}
+
+/**
+ * `geometry`'s triangles in `runs`, each its own compact geometry. rvt-rs
+ * writes a face set two-sided, every triangle then the same reversed, so a
+ * run covers its range in both halves; a transparent run takes the first
+ * only, as the faces are drawn double-sided and would blend twice. Null
+ * where the counts disagree.
+ */
+export function splitByRuns(
+  geometry: THREE.BufferGeometry,
+  runs: MaterialRun[],
+): { geometry: THREE.BufferGeometry; color: [number, number, number] | null; opacity: number }[] | null {
+  const index = geometry.index;
+  if (!index) return null;
+  const total = runs.reduce((n, r) => n + r.triangles, 0);
+  const triangles = index.count / 3;
+  const halves = triangles === total ? 1 : triangles === 2 * total ? 2 : 0;
+  if (!halves || total === 0) return null;
+  const position = geometry.getAttribute('position');
+  const result = [];
+  let start = 0;
+  for (const run of runs) {
+    const remap = new Map<number, number>();
+    const positions: number[] = [];
+    const indices: number[] = [];
+    for (let half = 0; half < (run.opacity < 1 ? 1 : halves); half++) {
+      const first = half * total + start;
+      for (let t = first; t < first + run.triangles; t++) {
+        for (let k = 0; k < 3; k++) {
+          const v = index.getX(t * 3 + k);
+          let m = remap.get(v);
+          if (m === undefined) {
+            m = remap.size;
+            remap.set(v, m);
+            positions.push(position.getX(v), position.getY(v), position.getZ(v));
+          }
+          indices.push(m);
+        }
+      }
+    }
+    const part = new THREE.BufferGeometry();
+    part.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    part.setIndex(indices);
+    result.push({ geometry: part, color: run.color, opacity: run.opacity });
+    start += run.triangles;
+  }
   return result;
 }
 

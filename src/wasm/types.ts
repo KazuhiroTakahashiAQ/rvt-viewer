@@ -299,3 +299,20 @@ export interface FileMetadata {
   single_user_cloud_model?: boolean;
   properties: { key: string; value: string }[];
 }
+
+/**
+ * A run of a saved-mesh body's triangles in one of Revit's materials, in the
+ * order of its face set. `color` is sRGB 0..1, null where the material is
+ * not known (the body's own colour then).
+ */
+export interface MaterialRun {
+  triangles: number;
+  color: [number, number, number] | null;
+  opacity: number;
+}
+
+/** The runs of a saved-mesh body with a transparent face (a window's glass). */
+export interface BodyMaterials {
+  entity: number;
+  runs: MaterialRun[];
+}

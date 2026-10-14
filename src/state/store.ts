@@ -12,7 +12,7 @@ import { type CategoryKey, hiddenByDefault } from '../model/categories';
 import type { ModelIndex } from '../model/modelIndex';
 import type { LengthUnit } from '../model/units';
 import { type ViewDef, initialViewId, listViews } from '../model/views';
-import type { ExportDiagnostics, FileMetadata, IfcModel, Schedule, Summary } from '../wasm/types';
+import type { BodyMaterials, ExportDiagnostics, FileMetadata, IfcModel, Schedule, Summary } from '../wasm/types';
 import type { LoadStep, SavedMeshReport } from '../worker/protocol';
 
 export interface LoadedDocument {
@@ -29,8 +29,8 @@ export interface LoadedDocument {
   hasGeometry: boolean;
   /** Second pass drawing boxed bodies from Revit's saved display meshes. */
   savedMeshes: { status: SavedMeshStatus; report: SavedMeshReport | null };
-  /** GLB with the saved meshes, present until the viewer has swapped it in. */
-  refinedGlb: Uint8Array | null;
+  /** GLB with the saved meshes and their materials, present until the viewer has swapped it in. */
+  refinedBody: { glb: Uint8Array; materials: BodyMaterials[] } | null;
 }
 
 export type SavedMeshStatus = 'pending' | 'done' | 'failed' | 'off';
@@ -130,9 +130,9 @@ interface Actions {
   savedMeshesDone(
     status: Exclude<SavedMeshStatus, 'pending' | 'off'>,
     report: SavedMeshReport | null,
-    refined?: { model: IfcModel; index: ModelIndex; glb: Uint8Array },
+    refined?: { model: IfcModel; index: ModelIndex; glb: Uint8Array; materials: BodyMaterials[] },
   ): void;
-  consumeRefinedGlb(): void;
+  consumeRefinedBody(): void;
 
   openView(id: string): void;
   activateView(id: string): void;
@@ -260,10 +260,16 @@ export const useStore = create<State & Actions>()(
         set((s) => {
           if (!s.doc) return {};
           const doc = { ...s.doc, savedMeshes: { status, report } };
-          if (refined) Object.assign(doc, { model: refined.model, index: refined.index, refinedGlb: refined.glb });
+          if (refined) {
+            Object.assign(doc, {
+              model: refined.model,
+              index: refined.index,
+              refinedBody: { glb: refined.glb, materials: refined.materials },
+            });
+          }
           return { doc };
         }),
-      consumeRefinedGlb: () => set((s) => (s.doc ? { doc: { ...s.doc, refinedGlb: null } } : {})),
+      consumeRefinedBody: () => set((s) => (s.doc ? { doc: { ...s.doc, refinedBody: null } } : {})),
 
       openView: (id) =>
         set((s) => {

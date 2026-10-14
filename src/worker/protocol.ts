@@ -1,4 +1,5 @@
 import type {
+  BodyMaterials,
   ExportDiagnostics,
   FileMetadata,
   IfcModel,
@@ -36,6 +37,7 @@ export interface SavedMeshReport {
 export interface RefinedPayload {
   model: IfcModel;
   glb: Uint8Array;
+  materials: BodyMaterials[];
   report: SavedMeshReport;
 }
 

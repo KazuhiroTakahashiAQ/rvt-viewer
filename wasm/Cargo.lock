@@ -377,6 +377,7 @@ name = "rvt-viewer-wasm"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "earcut",
  "rvt",
  "serde",
  "serde-wasm-bindgen",

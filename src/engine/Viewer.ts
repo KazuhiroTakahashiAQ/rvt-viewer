@@ -12,6 +12,7 @@
 
 import * as THREE from 'three';
 import type { CategoryKey } from '../model/categories';
+import type { BodyMaterials } from '../wasm/types';
 import { pickPriority } from '../model/categories';
 import { CameraRig, type CameraPose, type Projection, anglesFromDirection, boxCorners, clonePose } from './CameraRig';
 import { FLAG_HALFTONE, FLAG_HOVER, FLAG_REVEALED, FLAG_SELECTED, FLAG_VISIBLE } from './EntityState';
@@ -198,10 +199,10 @@ export class Viewer {
    * Swap in new bodies for the same entities (the saved-mesh pass): the
    * view, camera, selection and display settings stay as they are.
    */
-  async replaceGeometry(glb: Uint8Array): Promise<void> {
+  async replaceGeometry(glb: Uint8Array, materials: BodyMaterials[] = []): Promise<void> {
     const old = this.model;
     if (!old) return;
-    const mesh = await ModelMesh.fromGlb(glb, old.state.count, this.uniforms);
+    const mesh = await ModelMesh.fromGlb(glb, old.state.count, this.uniforms, materials);
     if (this.disposed || this.model !== old) {
       mesh.dispose();
       return;

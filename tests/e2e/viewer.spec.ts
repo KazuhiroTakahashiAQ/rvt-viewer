@@ -63,6 +63,8 @@ test.describe('with a sample model', () => {
   test.skip(!SAMPLE, 'RVT_SAMPLE is not set');
 
   test('Revit-like viewing workflow', async ({ page }) => {
+    // The saved meshes swap in during the test; software WebGL draws them slowly.
+    test.setTimeout(300_000);
     const errors = collectErrors(page);
     await page.goto('./');
     await openSample(page, SAMPLE!);

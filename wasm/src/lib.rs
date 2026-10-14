@@ -21,6 +21,7 @@ use rvt::ifc::{
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
+mod brep;
 pub mod saved_meshes;
 
 fn err_str<E: std::fmt::Display>(e: E) -> JsValue {
@@ -74,21 +75,41 @@ struct SavedMeshes {
     /// `None` when no body was replaced.
     model: Option<IfcModel>,
     report: SavedMeshReport,
+    /// The replaced bodies with a transparent face, in runs of one material.
+    materials: Vec<EntityMaterials>,
+}
+
+#[derive(Serialize)]
+struct EntityMaterials {
+    entity: usize,
+    runs: Vec<saved_meshes::MaterialRun>,
 }
 
 /// Replace the box bodies of `model` (from `openRvtBytesWithDiagnosticsMode`
 /// on the same `bytes`) with the meshes Revit saved for display, where the
 /// file holds them ([`saved_meshes::attach`]). Returns
-/// `{ model, report: { candidates, replaced, triangles } }`, `model` null
-/// when nothing was replaced; entity indices are unchanged.
+/// `{ model, report: { candidates, replaced, triangles }, materials }`,
+/// `model` null when nothing was replaced; entity indices are unchanged.
+/// `materials` lists `{ entity, runs: [{ triangles, color, opacity }] }`: the
+/// body's triangles in runs of one material, in the order of its face set.
 #[wasm_bindgen(js_name = attachSavedMeshes)]
 pub fn attach_saved_meshes(bytes: &[u8], model: JsValue) -> Result<JsValue, JsValue> {
     install_panic_hook();
     let mut model: IfcModel = from_js(model)?;
     let mut rf = RevitFile::open_bytes(bytes.to_vec()).map_err(err_str)?;
-    let report = saved_meshes::attach(&mut rf, &mut model).map_err(err_str)?;
+    let attached = saved_meshes::attach(&mut rf, &mut model).map_err(err_str)?;
+    let report = attached.report;
     let model = (report.replaced > 0).then_some(model);
-    to_js(&SavedMeshes { model, report })
+    let materials = attached
+        .materials
+        .into_iter()
+        .map(|(entity, runs)| EntityMaterials { entity, runs })
+        .collect();
+    to_js(&SavedMeshes {
+        model,
+        report,
+        materials,
+    })
 }
 
 /// Cheap metadata (BasicFileInfo, PartAtom, stream inventory).
