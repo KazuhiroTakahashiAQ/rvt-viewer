@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildBrowserTree, flattenTree } from '../../src/model/browserTree';
 import { categoryOf, hiddenByDefault, pickPriority } from '../../src/model/categories';
-import { buildModelIndex } from '../../src/model/modelIndex';
+import { bodyKind, buildModelIndex } from '../../src/model/modelIndex';
 import { splitElementName } from '../../src/model/naming';
 import {
   buildElementProperties,
@@ -14,6 +14,7 @@ import {
 } from '../../src/model/properties';
 import { formatArea, formatLength } from '../../src/model/units';
 import { listViews } from '../../src/model/views';
+import type { Property, PropertySet } from '../../src/wasm/types';
 import { sampleModel, t } from './fixtures';
 
 describe('splitElementName', () => {
@@ -74,7 +75,18 @@ describe('buildModelIndex', () => {
     const door = index.byIndex.get(3)!;
     expect(door.familyName).toBe('Single-Flush');
     expect(door.typeName).toBe('0915 x 2134mm');
-    expect(door.bboxOnly).toBe(true);
+    expect(door.body).toBe('approx');
+  });
+  it('tells approximate boxes from exact boxes and saved meshes', () => {
+    const set = (properties: Property[]): PropertySet => ({ name: 'RvtElementRecordGeometry', properties });
+    const text = (name: string, value: string): Property => ({ name, value: { kind: 'Text', value } });
+    expect(bodyKind(set([text('BodySource', 'partition_element_record_bbox')]))).toBe('approx');
+    expect(
+      bodyKind(set([text('BodySource', 'partition_element_record_bbox'), { name: 'ProfileResolved', value: { kind: 'Boolean', value: true } }])),
+    ).toBe('decoded');
+    expect(bodyKind(set([text('BodySource', 'saved_graphics_mesh')]))).toBe('savedMesh');
+    expect(bodyKind(set([text('BodySource', 'partition_element_record_join_trimmed')]))).toBe('decoded');
+    expect(bodyKind(undefined)).toBe('decoded');
   });
   it('records hosts, extra property sets and rooms', () => {
     expect(index.hosted.get(1)).toEqual([3]);

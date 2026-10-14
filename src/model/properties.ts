@@ -359,7 +359,14 @@ export function buildElementProperties(
   decode.push({
     key: 'bodySource',
     label: t('prop.geometrySource'),
-    value: rec.bboxOnly ? t('value.bboxBody') : e.extrusion || e.solid_shape || e.representation_map_index !== undefined ? t('value.decodedBody') : t('value.noBody'),
+    value:
+      rec.body === 'approx'
+        ? t('value.bboxBody')
+        : rec.body === 'savedMesh'
+          ? t('value.savedMeshBody')
+          : e.extrusion || e.solid_shape || e.representation_map_index !== undefined
+            ? t('value.decodedBody')
+            : t('value.noBody'),
   });
   for (const p of pset?.properties ?? []) {
     if (!INTERNAL_PROPS.has(p.name) || ['FamilyName', 'TypeName', 'RoomNumber', 'RoomName', 'ElementId', 'RevitClass'].includes(p.name)) continue;

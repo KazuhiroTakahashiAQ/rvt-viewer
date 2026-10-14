@@ -1,9 +1,13 @@
 import type { FileMetadata, Summary } from '../wasm/types';
-import type { ExportKind, FromWorker, LoadStep, ReadyPayload, ToWorker } from './protocol';
+import type { ExportKind, FromWorker, LoadStep, ReadyPayload, RefinedPayload, SavedMeshReport, ToWorker } from './protocol';
 
 export interface OpenCallbacks {
   onProgress: (step: LoadStep) => void;
   onSummary: (summary: Summary | null, metadata: FileMetadata | null) => void;
+  /** Draw boxed bodies from Revit's saved display meshes after `ready`. */
+  savedMeshes: boolean;
+  /** After `ready`, when `savedMeshes`: the refined model, or null when nothing changed or it failed. */
+  onRefined: (refined: RefinedPayload | null, report: SavedMeshReport | null, error?: string) => void;
 }
 
 /**
@@ -44,6 +48,9 @@ export class RvtWorkerClient {
             resolve(payload);
             break;
           }
+          case 'refined':
+            if (this.worker === worker) callbacks.onRefined(msg.refined, msg.report, msg.error);
+            break;
           case 'error':
             if (!settled) {
               settled = true;
@@ -66,7 +73,7 @@ export class RvtWorkerClient {
           reject(new Error(ev.message || 'worker error'));
         }
       });
-      this.post({ type: 'open', bytes }, [bytes.buffer as ArrayBuffer]);
+      this.post({ type: 'open', bytes, savedMeshes: callbacks.savedMeshes }, [bytes.buffer as ArrayBuffer]);
     });
   }
 

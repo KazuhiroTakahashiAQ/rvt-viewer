@@ -194,6 +194,32 @@ export class Viewer {
     this.requestRender();
   }
 
+  /**
+   * Swap in new bodies for the same entities (the saved-mesh pass): the
+   * view, camera, selection and display settings stay as they are.
+   */
+  async replaceGeometry(glb: Uint8Array): Promise<void> {
+    const old = this.model;
+    if (!old) return;
+    const mesh = await ModelMesh.fromGlb(glb, old.state.count, this.uniforms);
+    if (this.disposed || this.model !== old) {
+      mesh.dispose();
+      return;
+    }
+    this.scene.remove(old.root);
+    old.dispose();
+    this.model = mesh;
+    this.scene.add(mesh.root);
+    this.uniforms.uRvtState.value = mesh.state.state;
+    this.uniforms.uRvtOverride.value = mesh.state.override;
+    this.hover = null;
+    this.computePlanMask();
+    this.updateClipping();
+    if (this.display) this.applyDisplay(this.display);
+    else this.setSelection([...this.selection]);
+    this.requestRender();
+  }
+
   get modelBox(): THREE.Box3 | null {
     return this.model && !this.model.box.isEmpty() ? this.model.box.clone() : null;
   }

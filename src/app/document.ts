@@ -9,7 +9,7 @@ import { forgetFile, fileFromHandle, rememberFile, type RecentFile } from '../pw
 import { type LoadErrorCode, useStore } from '../state/store';
 import type { FileMetadata, Summary } from '../wasm/types';
 import { RvtWorkerClient } from '../worker/client';
-import type { ExportKind } from '../worker/protocol';
+import type { ExportKind, RefinedPayload, SavedMeshReport } from '../worker/protocol';
 import { baseName, downloadData, toJson } from './download';
 
 export const ACCEPTED_EXTENSIONS = ['.rvt', '.rfa', '.rte', '.rft'];
@@ -32,7 +32,12 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
   let metadata: FileMetadata | null = null;
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
+    const savedMeshes = store.prefs.savedMeshes;
     const ready = await client.open(bytes, {
+      savedMeshes,
+      onRefined: (refined, report, error) => {
+        if (seq === openSeq) savedMeshesDone(refined, report, error);
+      },
       onProgress: (step) => {
         if (seq === openSeq) useStore.getState().setLoadStep(step);
       },
@@ -57,6 +62,8 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
       index,
       glb: ready.glb,
       hasGeometry,
+      savedMeshes: { status: savedMeshes ? 'pending' : 'off', report: null },
+      refinedGlb: null,
     });
   } catch (err) {
     if (seq !== openSeq) return;
@@ -64,6 +71,21 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
     const detail = err instanceof Error ? err.message : String(err);
     useStore.getState().loadFailed(classifyError(detail, summary), detail);
   }
+}
+
+function savedMeshesDone(refined: RefinedPayload | null, report: SavedMeshReport | null, error?: string): void {
+  const store = useStore.getState();
+  if (!store.doc) return;
+  if (error !== undefined) {
+    store.savedMeshesDone('failed', null);
+    store.pushToast('error', i18n.t('savedMeshes.failed', { detail: error }));
+    return;
+  }
+  store.savedMeshesDone(
+    'done',
+    report,
+    refined ? { model: refined.model, index: buildModelIndex(refined.model), glb: refined.glb } : undefined,
+  );
 }
 
 function classifyError(detail: string, summary: Summary | null): LoadErrorCode {

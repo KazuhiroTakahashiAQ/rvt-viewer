@@ -13,7 +13,7 @@ import type { ModelIndex } from '../model/modelIndex';
 import type { LengthUnit } from '../model/units';
 import { type ViewDef, initialViewId, listViews } from '../model/views';
 import type { ExportDiagnostics, FileMetadata, IfcModel, Schedule, Summary } from '../wasm/types';
-import type { LoadStep } from '../worker/protocol';
+import type { LoadStep, SavedMeshReport } from '../worker/protocol';
 
 export interface LoadedDocument {
   fileName: string;
@@ -27,7 +27,13 @@ export interface LoadedDocument {
   /** Present until the viewer has consumed it. */
   glb: Uint8Array | null;
   hasGeometry: boolean;
+  /** Second pass drawing boxed bodies from Revit's saved display meshes. */
+  savedMeshes: { status: SavedMeshStatus; report: SavedMeshReport | null };
+  /** GLB with the saved meshes, present until the viewer has swapped it in. */
+  refinedGlb: Uint8Array | null;
 }
+
+export type SavedMeshStatus = 'pending' | 'done' | 'failed' | 'off';
 
 export type LoadErrorCode = 'notRevit' | 'unsupportedVersion' | 'outOfMemory' | 'unknown';
 
@@ -81,6 +87,8 @@ export interface Prefs {
   dockWidth: number;
   /** Fraction of the dock height given to the Properties palette. */
   dockSplit: number;
+  /** Replace boxed bodies with Revit's saved display meshes after opening. */
+  savedMeshes: boolean;
 }
 
 export interface Toast {
@@ -118,6 +126,13 @@ interface Actions {
   dismissLoadError(): void;
   closeDocument(): void;
   consumeGlb(): void;
+  /** The saved-mesh pass finished: `refined` carries the new model when bodies changed. */
+  savedMeshesDone(
+    status: Exclude<SavedMeshStatus, 'pending' | 'off'>,
+    report: SavedMeshReport | null,
+    refined?: { model: IfcModel; index: ModelIndex; glb: Uint8Array },
+  ): void;
+  consumeRefinedGlb(): void;
 
   openView(id: string): void;
   activateView(id: string): void;
@@ -159,6 +174,7 @@ export const DEFAULT_PREFS: Prefs = {
   ribbonMinimized: false,
   dockWidth: 300,
   dockSplit: 0.5,
+  savedMeshes: true,
 };
 
 export function defaultViewSettings(view: ViewDef): ViewSettings {
@@ -240,6 +256,14 @@ export const useStore = create<State & Actions>()(
       dismissLoadError: () => set({ loadError: null }),
       closeDocument: () => set({ ...initialDocState, loadError: null, dialog: null, ribbonTab: 'view' }),
       consumeGlb: () => set((s) => (s.doc ? { doc: { ...s.doc, glb: null } } : {})),
+      savedMeshesDone: (status, report, refined) =>
+        set((s) => {
+          if (!s.doc) return {};
+          const doc = { ...s.doc, savedMeshes: { status, report } };
+          if (refined) Object.assign(doc, { model: refined.model, index: refined.index, refinedGlb: refined.glb });
+          return { doc };
+        }),
+      consumeRefinedGlb: () => set((s) => (s.doc ? { doc: { ...s.doc, refinedGlb: null } } : {})),
 
       openView: (id) =>
         set((s) => {

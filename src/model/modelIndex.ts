@@ -28,8 +28,26 @@ export interface ElementRecord {
   /** Rooms only. */
   roomNumber: string | null;
   roomName: string | null;
-  /** Body is only the element's bounding box (decoder fallback). */
-  bboxOnly: boolean;
+  /** How the body was obtained. */
+  body: BodyKind;
+}
+
+/**
+ * `approx`: the record's bounding box standing in for an undecoded shape;
+ * `savedMesh`: the mesh Revit saved for display; `decoded`: everything else
+ * (decoded profiles, and boxes rvt-rs proved to be the exact shape).
+ */
+export type BodyKind = 'decoded' | 'approx' | 'savedMesh';
+
+const BBOX_BODY = 'partition_element_record_bbox';
+const SAVED_MESH_BODY = 'saved_graphics_mesh';
+
+export function bodyKind(set: PropertySet | undefined): BodyKind {
+  const source = textOf(findProperty(set, 'BodySource'));
+  if (source === SAVED_MESH_BODY) return 'savedMesh';
+  const exact = findProperty(set, 'ProfileResolved');
+  if (source === BBOX_BODY && !(exact?.kind === 'Boolean' && exact.value)) return 'approx';
+  return 'decoded';
 }
 
 export interface StoreyRecord {
@@ -111,7 +129,7 @@ export function buildModelIndex(model: IfcModel): ModelIndex {
           globalId: (globalIds instanceof Map ? globalIds.get(index) : undefined) ?? null,
           roomNumber: textOf(findProperty(pset, 'RoomNumber')),
           roomName: textOf(findProperty(pset, 'RoomName')),
-          bboxOnly: textOf(findProperty(pset, 'BodySource')) === 'partition_element_record_bbox',
+          body: bodyKind(pset),
         };
         elements.push(record);
         byIndex.set(index, record);

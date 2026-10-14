@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build the rvt-rs WebAssembly bindings (vendor/rvt-rs/rvt-wasm) into src/wasm/pkg.
+# Build the rvt-rs WebAssembly bindings (wasm/, on top of vendor/rvt-rs) into src/wasm/pkg.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CRATE="$ROOT/vendor/rvt-rs/rvt-wasm"
+CRATE="$ROOT/wasm"
 OUT="$ROOT/src/wasm/pkg"
 
-if [ ! -f "$CRATE/Cargo.toml" ]; then
+if [ ! -f "$ROOT/vendor/rvt-rs/Cargo.toml" ]; then
   echo "vendor/rvt-rs is missing. Run: git submodule update --init" >&2
   exit 1
 fi

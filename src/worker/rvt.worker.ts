@@ -8,6 +8,7 @@
  */
 
 import init, {
+  attachSavedMeshes,
   buildSceneGraph,
   buildSchedule,
   distinctIfcTypes,
@@ -27,7 +28,7 @@ import type {
   Schedule,
   Summary,
 } from '../wasm/types';
-import type { ExportKind, FromWorker, ToWorker } from './protocol';
+import type { ExportKind, FromWorker, SavedMeshReport, ToWorker } from './protocol';
 
 let model: IfcModel | null = null;
 let glb: Uint8Array | null = null;
@@ -46,7 +47,7 @@ function tryOr<T>(fn: () => T, fallback: T): T {
   }
 }
 
-async function open(bytes: Uint8Array): Promise<void> {
+async function open(bytes: Uint8Array, savedMeshes: boolean): Promise<void> {
   send({ type: 'progress', step: 'init' });
   await init();
 
@@ -78,6 +79,33 @@ async function open(bytes: Uint8Array): Promise<void> {
     { type: 'ready', model, diagnostics: result.diagnostics, scene, types, glb: glbCopy, schedule },
     [glbCopy.buffer as ArrayBuffer],
   );
+
+  if (savedMeshes) refine(bytes);
+}
+
+/**
+ * Second pass: draw the bodies rvt-rs could only box (doors, windows,
+ * furniture, …) from the meshes Revit saved for display. Slow on large
+ * files, so the boxed model is shown first.
+ */
+function refine(bytes: Uint8Array): void {
+  if (!model) return;
+  try {
+    const result = attachSavedMeshes(bytes, model) as { model: IfcModel | null; report: SavedMeshReport };
+    if (!result.model) {
+      send({ type: 'refined', refined: null, report: result.report });
+      return;
+    }
+    model = result.model;
+    glb = modelToGlb(model);
+    const glbCopy = glb.slice();
+    send(
+      { type: 'refined', refined: { model, glb: glbCopy, report: result.report }, report: result.report },
+      [glbCopy.buffer as ArrayBuffer],
+    );
+  } catch (err) {
+    send({ type: 'refined', refined: null, report: null, error: errorText(err) });
+  }
 }
 
 function runExport(kind: ExportKind): Uint8Array | string {
@@ -101,7 +129,7 @@ self.addEventListener('message', (ev: MessageEvent<ToWorker>) => {
   const msg = ev.data;
   switch (msg.type) {
     case 'open':
-      open(msg.bytes).catch((err: unknown) => send({ type: 'error', message: errorText(err) }));
+      open(msg.bytes, msg.savedMeshes).catch((err: unknown) => send({ type: 'error', message: errorText(err) }));
       return;
     case 'export': {
       try {

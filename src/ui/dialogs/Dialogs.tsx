@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import { Download } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -5,7 +6,7 @@ import { exportDocument } from '../../app/document';
 import { SUPPORTED_LANGUAGES, currentLocale } from '../../i18n';
 import { type CategoryKey, categoryRank } from '../../model/categories';
 import { formatLength, type LengthUnit } from '../../model/units';
-import { type BackgroundPref, type ThemePref, useStore } from '../../state/store';
+import { type BackgroundPref, type LoadedDocument, type ThemePref, useStore } from '../../state/store';
 import { Dialog } from '../common/Dialog';
 import { VisibilityGraphicsDialog } from './VisibilityGraphicsDialog';
 
@@ -230,6 +231,7 @@ function DiagnosticsDialog({ onClose }: { onClose: () => void }) {
           [t('diagnostics.elements'), String(d.exported.building_elements)],
           [t('diagnostics.withGeometry'), String(d.exported.building_elements_with_geometry)],
           [t('diagnostics.bboxBodies'), String(d.exported.bounding_box_bodies)],
+          [t('diagnostics.savedMeshes'), savedMeshesText(doc.savedMeshes, t)],
           [t('diagnostics.storeys'), String(d.exported.storey_count)],
           [t('diagnostics.materials'), String(d.exported.material_count)],
           [t('diagnostics.parameters'), String(d.decoded.parameter_value_count)],
@@ -257,6 +259,11 @@ function DiagnosticsDialog({ onClose }: { onClose: () => void }) {
       ) : null}
     </Dialog>
   );
+}
+
+function savedMeshesText({ status, report }: LoadedDocument['savedMeshes'], t: TFunction): string {
+  if (status === 'done' && report) return t('diagnostics.savedMeshesReplaced', { replaced: report.replaced, candidates: report.candidates });
+  return t(`diagnostics.savedMeshesStatus.${status}`);
 }
 
 function UnitsDialog({ onClose }: { onClose: () => void }) {
@@ -300,6 +307,7 @@ function OptionsDialog({ onClose }: { onClose: () => void }) {
   const setPrefs = useStore((s) => s.setPrefs);
   const [theme, setTheme] = useState<ThemePref>(prefs.theme);
   const [background, setBackground] = useState<BackgroundPref>(prefs.background);
+  const [savedMeshes, setSavedMeshes] = useState(prefs.savedMeshes);
   return (
     <Dialog
       title={t('options.title')}
@@ -307,7 +315,7 @@ function OptionsDialog({ onClose }: { onClose: () => void }) {
       width={420}
       footer={
         <>
-          <button type="button" className="button primary" onClick={() => (setPrefs({ theme, background }), onClose())}>
+          <button type="button" className="button primary" onClick={() => (setPrefs({ theme, background, savedMeshes }), onClose())}>
             {t('common.ok')}
           </button>
           <button type="button" className="button" onClick={onClose}>
@@ -346,6 +354,11 @@ function OptionsDialog({ onClose }: { onClose: () => void }) {
           ))}
         </select>
       </label>
+      <label className="check-row">
+        <input type="checkbox" checked={savedMeshes} onChange={(e) => setSavedMeshes(e.target.checked)} />
+        <span>{t('options.savedMeshes')}</span>
+      </label>
+      <p className="muted small">{t('options.savedMeshesNote')}</p>
     </Dialog>
   );
 }

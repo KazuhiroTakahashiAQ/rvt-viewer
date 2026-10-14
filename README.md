@@ -40,8 +40,9 @@ Revit ファイル (`.rvt` / `.rfa` / `.rte` / `.rft`) をブラウザだけで�
 
 読み取れる内容は rvt-rs の対応範囲に依存します（rvt-rs README の「What does not work yet」を参照）。
 
-- Revit 2024 / 2025 のプロジェクト: 要素と形状。ただしドア・窓・家具などの多くは境界ボックスによる近似形状です。
-- Revit 2023: 要素（形状はすべて境界ボックス）。
+- Revit 2024 / 2025 のプロジェクト: 要素と形状。
+- Revit 2023: 要素（形状は境界ボックス。壁は結合部で切り詰め）。
+- rvt-rs が形状を復元できない要素（ドア・窓・家具などのロード可能ファミリ）は、まず境界ボックスで表示し、読込後に Revit がファイルに保存した表示用メッシュに置き換えます（rvt-rs の `--saved-meshes` 相当）。置換中はステータス バーに「詳細形状を読込中…」と表示され、置換できた件数は「管理 → 読込診断」で確認できます。大きなファイルでは時間がかかるため、「ファイル → オプション」で無効にできます。保存済みメッシュがない要素は境界ボックスのままです。
 - それ以前のバージョン: ファイル情報（メタデータ）のみ。
 - ファミリ (`.rfa`): ファイル情報のみ（ファミリ形状は未対応）。
 - 壁の開口は切り欠かれません。パラメータは一部のみ読み取れます。
@@ -55,7 +56,7 @@ git clone --recursive https://github.com/KazuhiroTakahashiAQ/rvt-viewer.git
 cd rvt-viewer
 rustup target add wasm32-unknown-unknown
 pnpm install
-pnpm run build:wasm   # vendor/rvt-rs を src/wasm/pkg にビルド（初回は数分）
+pnpm run build:wasm   # wasm/（vendor/rvt-rs のバインディング）を src/wasm/pkg にビルド（初回は数分）
 pnpm dev              # http://localhost:5173/rvt-viewer/
 ```
 
@@ -86,6 +87,9 @@ pnpm run build:wasm
 ### 構成
 
 ```
+wasm/          rvt-rs の WebAssembly バインディング。rvt-rs 同梱の rvt-wasm のうち
+               本アプリが使う関数と、rvt-wasm が公開していない保存済み表示メッシュの
+               読み込み（attachSavedMeshes）を公開する
 src/
   worker/      rvt-rs (wasm) を実行する Web Worker と通信
   engine/      three.js による描画エンジン（要素のマージ描画、状態テクスチャ、

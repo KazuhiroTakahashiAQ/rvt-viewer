@@ -277,6 +277,7 @@
     "unknown": "不明",
     "unassigned": "(未割り当て)",
     "bboxBody": "境界ボックス (近似)",
+    "savedMeshBody": "Revit の保存済み表示メッシュ",
     "decodedBody": "解析済み形状",
     "noBody": "形状なし"
   },
@@ -402,12 +403,20 @@
   },
   "diagnostics": {
     "title": "読込診断",
-    "lead": "rvt-rs がこのファイルから復元できた情報の範囲です。形状の一部は境界ボックスによる近似で表示されます。",
+    "lead": "rvt-rs がこのファイルから復元できた情報の範囲です。形状を復元できない要素は、Revit が表示用に保存したメッシュか、境界ボックスによる近似で表示されます。",
     "level": "読込レベル",
     "score": "信頼度",
     "elements": "要素数",
     "withGeometry": "形状のある要素",
-    "bboxBodies": "境界ボックス近似の要素",
+    "bboxBodies": "rvt-rs が境界ボックスで出力した要素",
+    "savedMeshes": "保存済みメッシュで表示した要素",
+    "savedMeshesReplaced": "{{replaced}} / {{candidates}}",
+    "savedMeshesStatus": {
+      "pending": "読込中…",
+      "failed": "読込失敗 (境界ボックスで表示)",
+      "off": "オフ (オプションで有効化)",
+      "done": "—"
+    },
     "storeys": "レベル数",
     "materials": "マテリアル数",
     "parameters": "パラメータ値の数",
@@ -436,7 +445,9 @@
       "white": "白",
       "gray": "グレー",
       "black": "黒"
-    }
+    },
+    "savedMeshes": "保存済みの表示メッシュでドアや家具などの形状を表示する",
+    "savedMeshesNote": "形状を復元できない要素を、Revit がファイルに保存した表示用メッシュで描きます。オフにすると境界ボックスで表示します。大きなファイルでは読込後に数秒〜数十秒かかります。次に開くファイルから反映されます。"
   },
   "language": {
     "ja": "日本語"
@@ -466,7 +477,7 @@
     "offline": "インストールするとオフラインでも使用でき、Revit ファイルをこのアプリで直接開けます。",
     "supportTitle": "対応状況 (rvt-rs)",
     "support2024": "Revit 2024 / 2025: 要素と形状",
-    "support2023": "Revit 2023: 要素 (境界ボックス形状)",
+    "support2023": "Revit 2023: 要素 (主に境界ボックス形状)",
     "supportOther": "その他のバージョン: ファイル情報のみ",
     "supportFamily": "ファミリ (.rfa): ファイル情報のみ"
   },
@@ -525,5 +536,10 @@
     "updateAvailable": "新しいバージョンがあります。",
     "offlineReady": "オフラインで使用できるようになりました。",
     "reload": "更新"
+  },
+  "savedMeshes": {
+    "pending": "詳細形状を読込中…",
+    "pendingTitle": "境界ボックスで表示している要素を、Revit が保存した表示用メッシュに置き換えています",
+    "failed": "詳細形状を読み込めませんでした。境界ボックスのまま表示します: {{detail}}"
   }
 }

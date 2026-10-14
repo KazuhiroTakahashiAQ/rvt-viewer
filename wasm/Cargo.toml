@@ -1,0 +1,34 @@
+[package]
+name = "rvt-viewer-wasm"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.87"
+license = "Apache-2.0"
+description = "WebAssembly bindings of rvt-rs used by rvt-viewer: the subset of rvt-wasm the viewer calls, plus the saved display meshes rvt-wasm does not expose."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rvt = { path = "../vendor/rvt-rs" }
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+serde = { version = "1", features = ["derive"] }
+
+# Standalone: not a member of vendor/rvt-rs' workspace.
+[workspace]
+
+# Same as vendor/rvt-rs' release profile.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# wasm-pack 0.15's bundled wasm-opt rejects rustc's bulk-memory output
+# (see vendor/rvt-rs/rvt-wasm/Cargo.toml); ship wasm-bindgen's output as is.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false

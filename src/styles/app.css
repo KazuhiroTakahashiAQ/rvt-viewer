@@ -1229,6 +1229,12 @@ select {
   white-space: nowrap;
 }
 
+.status-busy {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .status-button {
   display: flex;
   align-items: center;
@@ -1418,7 +1424,8 @@ select {
   padding: 8px 12px;
 }
 
-.radio {
+.radio,
+.check-row {
   display: flex;
   align-items: center;
   gap: 6px;

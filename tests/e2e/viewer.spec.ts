@@ -166,10 +166,47 @@ test.describe('with a sample model', () => {
     expect(errors).toEqual([]);
   });
 
+  test('boxed bodies are redrawn from the meshes Revit saved for display', async ({ page }) => {
+    test.setTimeout(300_000);
+    const errors = collectErrors(page);
+    await page.goto('./');
+    await openSample(page, SAMPLE!);
+    await expect(page.locator('.view-tab.active')).toContainText('3D ビュー', { timeout: 90_000 });
+    await page.waitForTimeout(500);
+    await shot(page, '10-boxes');
+    await expect(page.locator('.statusbar')).toHaveAttribute('data-saved-meshes', 'done', { timeout: 180_000 });
+    await expect(page.locator('.status-busy')).toHaveCount(0);
+    await page.waitForTimeout(500);
+    await shot(page, '11-saved-meshes');
+
+    await page.locator('.statusbar .status-button').first().click();
+    const row = page.getByRole('row', { name: /保存済みメッシュで表示した要素/ });
+    const [replaced, candidates] = ((await row.locator('td').textContent()) ?? '').split('/').map((s) => Number(s.trim()));
+    expect(replaced).toBeGreaterThanOrEqual(0);
+    expect(replaced).toBeLessThanOrEqual(candidates!);
+    await page.getByRole('button', { name: 'OK' }).click();
+
+    // Doors are boxes without the saved meshes: select them all and read where their bodies came from.
+    await page.getByRole('searchbox', { name: 'プロジェクト ブラウザを検索' }).fill('ドア');
+    const doors = page.locator('.tree-row.kind-category', { hasText: /^ドア$/ });
+    if (replaced! > 0 && (await doors.count()) > 0) {
+      await doors.click({ button: 'right' });
+      await page.getByRole('menuitem', { name: 'すべてのインスタンスを選択' }).hover();
+      await page.getByRole('menuitem', { name: 'プロジェクト全体' }).click();
+      await page.locator('.prop-group-header', { hasText: '読込情報' }).click();
+      await expect(page.locator('.prop-row', { hasText: '形状の取得元' })).toContainText('保存済み表示メッシュ');
+      await shot(page, '12-doors');
+    }
+    expect(errors).toEqual([]);
+  });
+
   test('floor plans are not crushed to black by the cut fill', async ({ page }) => {
+    test.setTimeout(300_000);
     await page.goto('./');
     await openSample(page, SAMPLE!);
     await expect(page.locator('.view-tab.active')).toBeVisible({ timeout: 90_000 });
+    // Measure the final bodies, saved meshes included.
+    await expect(page.locator('.statusbar')).not.toHaveAttribute('data-saved-meshes', 'pending', { timeout: 180_000 });
     const plans = page.locator('.tree-row[data-view-kind="plan"]');
     const n = await plans.count();
     expect(n).toBeGreaterThan(0);

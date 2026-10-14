@@ -1,4 +1,4 @@
-import { Funnel } from 'lucide-react';
+import { Funnel, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { elementLabel } from '../../model/properties';
 import { useStore } from '../../state/store';
@@ -22,12 +22,18 @@ export function StatusBar() {
 
   const confidence = doc?.diagnostics.confidence;
   return (
-    <footer className="statusbar">
+    <footer className="statusbar" data-saved-meshes={doc?.savedMeshes.status}>
       <div className="status-message" aria-live="polite">
         {message}
       </div>
       {doc ? (
         <>
+          {doc.savedMeshes.status === 'pending' ? (
+            <div className="status-item status-busy" title={t('savedMeshes.pendingTitle')}>
+              <LoaderCircle size={12} className="spin" />
+              <span>{t('savedMeshes.pending')}</span>
+            </div>
+          ) : null}
           <div className="status-item" title={t('status.revitVersionTitle')}>
             {t('status.revitVersion', { version: doc.summary?.version ?? doc.metadata?.revit_version ?? '?' })}
           </div>

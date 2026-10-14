@@ -152,6 +152,17 @@ export function ModelViewHost({ visible }: { visible: boolean }) {
       });
   }, [doc, t]);
 
+  // Saved display meshes arrive after the boxed model: swap the bodies in place.
+  const refinedGlb = doc?.refinedGlb ?? null;
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !ready || !refinedGlb) return;
+    useStore.getState().consumeRefinedGlb();
+    void viewer.replaceGeometry(refinedGlb).catch((err: unknown) => {
+      useStore.getState().pushToast('error', t('error.geometry', { detail: err instanceof Error ? err.message : String(err) }));
+    });
+  }, [ready, refinedGlb, t]);
+
   // Active view → camera, clipping, style.
   const levelFeet = modelView?.storeyIndex !== undefined ? doc?.index.storeys[modelView.storeyIndex]?.elevationFeet : undefined;
   const config = useMemo(
