@@ -560,6 +560,7 @@ export class Viewer {
       state.setColor(entity, ov?.color ? new THREE.Color(ov.color) : null);
     }
     state.commit();
+    model.setOpacityOverrides(Object.values(display.overrides).some((ov) => (ov?.transparency ?? 0) > 0));
     this.viewChanged();
     this.requestRender();
   }

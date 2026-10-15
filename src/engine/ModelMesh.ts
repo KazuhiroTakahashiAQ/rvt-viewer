@@ -19,7 +19,7 @@ import type { MaterialRun } from '../wasm/types';
 import type { RefinePatch } from '../worker/protocol';
 import { EntityState } from './EntityState';
 import { InstanceGroup, type InstanceHit, type InstancePart } from './InstanceGroup';
-import { type SharedUniforms, createEdgeMaterial, createFaceMaterial } from './modelMaterials';
+import { type SharedUniforms, createEdgeMaterial, createFaceMaterial, passVisible } from './modelMaterials';
 
 const EDGE_THRESHOLD_DEG = 25;
 
@@ -83,14 +83,18 @@ interface ChunkEdgeItem {
 
 /** One or more patches' bodies, drawn together. */
 interface Chunk {
-  /** How many merges it went through: chunks of one level merge together. */
+  /** 0 for a single patch, 1 for patches merged. */
   level: number;
   groups: { geometry: THREE.BufferGeometry; items: ChunkItem[]; meshes: THREE.Mesh[] }[];
   edges: { geometry: THREE.BufferGeometry; lines: THREE.LineSegments; items: ChunkEdgeItem[] } | null;
   disposables: { dispose(): void }[];
 }
 
-/** Chunks of one level merged into one of the next. */
+/**
+ * Single patches are merged this many at a time, and merged chunks no
+ * further: merging those again would build (and upload to the GPU) much of
+ * the model at once, stopping the page and the GPU for most of a second.
+ */
 const MERGE_FAN_IN = 6;
 
 /**
@@ -130,6 +134,13 @@ interface Batch {
  * so that no single merge or BVH build blocks the page for long.
  */
 const MAX_BATCH_TRIANGLES = 400_000;
+
+/**
+ * The same for the saved-mesh patches, which come while the user looks
+ * around: a BVH takes about 0.25 ms a thousand triangles to build, in one
+ * go, so about 30 ms.
+ */
+const MAX_PATCH_TRIANGLES = 120_000;
 
 /** Work between yields to the browser, milliseconds. */
 const SLICE_MS = 12;
@@ -189,6 +200,8 @@ export class ModelMesh {
   private readonly groups = new Map<string, InstanceGroup>();
   private readonly slots = new Map<number, { group: InstanceGroup; slot: number }>();
   private instancedShapes = 0;
+  /** Some element has an opacity override: the transparent pass draws every batch. */
+  private opacityOverrides = false;
 
   /**
    * A shape is drawn by instancing once that saves this many triangles
@@ -298,6 +311,7 @@ export class ModelMesh {
     await slicer.at(0.98);
     this.buildEdges(edgeChunks, uniforms);
     for (const front of fronts) front.dispose();
+    this.updatePasses();
     onProgress?.(1);
   }
 
@@ -486,11 +500,9 @@ export class ModelMesh {
       edges.push({ entity, positions: transformed(shape.edges, matrix) });
     }
     if (parts.length > 0) this.show(await this.buildChunk(parts, edges, 0, uniforms, slicer), []);
-    for (let level = 0; ; level++) {
-      const same = this.chunks.filter((c) => c.level === level);
-      if (same.length < MERGE_FAN_IN) break;
-      await this.merge(same, level + 1, uniforms, slicer);
-    }
+    const single = this.chunks.filter((c) => c.level === 0);
+    if (single.length >= MERGE_FAN_IN) await this.merge(single, 1, uniforms, slicer);
+    this.updatePasses();
   }
 
   /**
@@ -501,6 +513,7 @@ export class ModelMesh {
     const small = this.chunks.filter((c) => c.level === 0);
     if (small.length < 2) return;
     await this.merge(small, 1, uniforms, new Slicer(undefined, gate));
+    this.updatePasses();
   }
 
   /** Patch chunks drawn now. */
@@ -639,7 +652,7 @@ export class ModelMesh {
     this.show(merged, chunks);
   }
 
-  /** Meshes for `parts`, one per look (split at MAX_BATCH_TRIANGLES), and one edge set. */
+  /** Meshes for `parts`, one per look (split at MAX_PATCH_TRIANGLES), and one edge set. */
   private async buildChunk(parts: Part[], edges: PartEdges[], level: number, uniforms: SharedUniforms, slicer: Slicer): Promise<Chunk> {
     const chunk: Chunk = { level, groups: [], edges: null, disposables: [] };
     const byLook = new Map<string, Part[][]>();
@@ -650,7 +663,7 @@ export class ModelMesh {
       byLook.set(key, lists);
       let list = lists.at(-1);
       const triangles = part.indices.length / 3;
-      if (!list || (list.length > 0 && sizes.get(list)! + triangles > MAX_BATCH_TRIANGLES)) {
+      if (!list || (list.length > 0 && sizes.get(list)! + triangles > MAX_PATCH_TRIANGLES)) {
         list = [];
         lists.push(list);
         sizes.set(list, 0);
@@ -742,6 +755,20 @@ export class ModelMesh {
       this.entityBoxes.set(entity, box);
     }
     return box;
+  }
+
+  /** Tell whether some element has an opacity override (the transparent pass is drawn for all then). */
+  setOpacityOverrides(on: boolean): void {
+    this.opacityOverrides = on;
+    this.updatePasses();
+  }
+
+  /** Show only the passes that can draw something ([`passVisible`]). */
+  private updatePasses(): void {
+    this.root.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.isMesh && !Array.isArray(mesh.material)) mesh.visible = passVisible(mesh.material, this.opacityOverrides);
+    });
   }
 
   /** Entities with a body, i.e. anything that can be drawn or picked. */

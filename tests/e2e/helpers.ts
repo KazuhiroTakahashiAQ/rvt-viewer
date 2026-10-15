@@ -42,8 +42,8 @@ export async function openSample(page: Page, path: string): Promise<void> {
   );
 }
 
-/** Share of dark pixels (all channels < 110) in a PNG screenshot, sampled every 4th pixel. */
-export function darkRatio(png: Buffer): number {
+/** A PNG screenshot's pixels: `bpp` bytes each (RGB or RGBA), row by row. */
+function decodePng(png: Buffer): { width: number; height: number; bpp: number; pixels: Uint8Array } {
   let pos = 8;
   let width = 0;
   let height = 0;
@@ -65,9 +65,8 @@ export function darkRatio(png: Buffer): number {
   const raw = inflateSync(Buffer.concat(idat));
   const bpp = colorType === 6 ? 4 : 3;
   const stride = width * bpp;
+  const pixels = new Uint8Array(stride * height);
   let prev = new Uint8Array(stride);
-  let dark = 0;
-  let total = 0;
   for (let y = 0, i = 0; y < height; y++) {
     const filter = raw[i++]!;
     const line = new Uint8Array(raw.subarray(i, i + stride));
@@ -87,13 +86,40 @@ export function darkRatio(png: Buffer): number {
         line[x] = (line[x]! + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c)) & 255;
       }
     }
-    if (y % 4 === 0) {
-      for (let x = 0; x < stride; x += bpp * 4) {
-        total++;
-        if (line[x]! < 110 && line[x + 1]! < 110 && line[x + 2]! < 110) dark++;
-      }
-    }
+    pixels.set(line, y * stride);
     prev = line;
   }
+  return { width, height, bpp, pixels };
+}
+
+/** Share of dark pixels (all channels < 110) in a PNG screenshot, sampled every 4th pixel. */
+export function darkRatio(png: Buffer): number {
+  const { width, height, bpp, pixels } = decodePng(png);
+  let dark = 0;
+  let total = 0;
+  for (let y = 0; y < height; y += 4) {
+    for (let x = 0; x < width; x += 4) {
+      const i = (y * width + x) * bpp;
+      total++;
+      if (pixels[i]! < 110 && pixels[i + 1]! < 110 && pixels[i + 2]! < 110) dark++;
+    }
+  }
   return total ? dark / total : 0;
+}
+
+/** Share of pixels whose colour differs by more than `threshold` in some channel, two screenshots of one size. */
+export function pixelDifference(a: Buffer, b: Buffer, threshold = 24): number {
+  const pa = decodePng(a);
+  const pb = decodePng(b);
+  if (pa.width !== pb.width || pa.height !== pb.height) return 1;
+  let differ = 0;
+  for (let i = 0; i < pa.width * pa.height; i++) {
+    for (let k = 0; k < 3; k++) {
+      if (Math.abs(pa.pixels[i * pa.bpp + k]! - pb.pixels[i * pb.bpp + k]!) > threshold) {
+        differ++;
+        break;
+      }
+    }
+  }
+  return differ / (pa.width * pa.height);
 }

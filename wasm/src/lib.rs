@@ -72,8 +72,10 @@ fn object(entries: &[(&str, &JsValue)]) -> Result<JsValue, JsValue> {
 /// (its bytes until the pass starts, then the open file and the pass's
 /// state until it ends).
 struct Document {
-    bytes: Option<Vec<u8>>,
-    refining: Option<(RevitFile, saved_meshes::Refiner)>,
+    /// The file the model was read from, with what rvt-rs has inflated and
+    /// read of it: the saved-mesh pass reads it again.
+    file: Option<RevitFile>,
+    refiner: Option<saved_meshes::Refiner>,
     model: IfcModel,
 }
 
@@ -122,7 +124,7 @@ pub fn open_document(bytes: Vec<u8>, mode: &str) -> Result<JsValue, JsValue> {
     install_panic_hook();
     close_document();
     let quality_mode = ExportQualityMode::parse(mode).map_err(err_str)?;
-    let mut rf = RevitFile::open_bytes(bytes.clone()).map_err(err_str)?;
+    let mut rf = RevitFile::open_bytes(bytes).map_err(err_str)?;
     let result = RvtDocExporter
         .export_with_diagnostics_mode_and_limits(
             &mut rf,
@@ -130,7 +132,8 @@ pub fn open_document(bytes: Vec<u8>, mode: &str) -> Result<JsValue, JsValue> {
             rvt::walker::WalkerLimits::default(),
         )
         .map_err(err_str)?;
-    drop(rf);
+    // The saved-mesh pass reads the inflated partitions again, nothing else.
+    rf.release_export_caches();
     let mut model = result.model;
     let out = object(&[
         ("model", &page_model(&mut model)?),
@@ -138,12 +141,23 @@ pub fn open_document(bytes: Vec<u8>, mode: &str) -> Result<JsValue, JsValue> {
     ])?;
     DOCUMENT.with(|cell| {
         *cell.borrow_mut() = Some(Document {
-            bytes: Some(bytes),
-            refining: None,
+            file: Some(rf),
+            refiner: None,
             model,
         })
     });
     Ok(out)
+}
+
+/// Let go of the open file, with what rvt-rs inflated of it, where no
+/// saved-mesh pass will read it.
+#[wasm_bindgen(js_name = documentReleaseFile)]
+pub fn document_release_file() {
+    DOCUMENT.with(|cell| {
+        if let Some(document) = cell.borrow_mut().as_mut() {
+            document.file = None;
+        }
+    });
 }
 
 /// Close the document and free its memory for the next one (wasm memory
@@ -229,18 +243,20 @@ pub fn document_schedule_csv(kind: &str, metric: bool, excel: bool) -> Result<St
 pub fn document_refine_begin() -> Result<js_sys::Uint32Array, JsValue> {
     install_panic_hook();
     with_document(|document| {
-        let Some(bytes) = document.bytes.take() else {
-            let pending: Vec<u32> = match &document.refining {
-                Some((_, refiner)) => refiner.pending().map(|i| i as u32).collect(),
-                None => Vec::new(),
-            };
+        if let Some(refiner) = &document.refiner {
+            let pending: Vec<u32> = refiner.pending().map(|i| i as u32).collect();
             return Ok(js_sys::Uint32Array::from(pending.as_slice()));
+        }
+        // What rvt-rs inflated for the model serves the pass too.
+        let Some(rf) = document.file.as_mut() else {
+            return Ok(js_sys::Uint32Array::new_with_length(0));
         };
-        let mut rf = RevitFile::open_bytes(bytes).map_err(err_str)?;
-        let refiner = saved_meshes::Refiner::new(&mut rf, &document.model).map_err(err_str)?;
+        let refiner = saved_meshes::Refiner::new(rf, &document.model).map_err(err_str)?;
         let pending: Vec<u32> = refiner.pending().map(|i| i as u32).collect();
-        if !refiner.is_done() {
-            document.refining = Some((rf, refiner));
+        if refiner.is_done() {
+            document.file = None;
+        } else {
+            document.refiner = Some(refiner);
         }
         Ok(js_sys::Uint32Array::from(pending.as_slice()))
     })
@@ -268,7 +284,7 @@ struct EntityRuns {
 pub fn document_refine_batch(entities: &[u32]) -> Result<JsValue, JsValue> {
     install_panic_hook();
     with_document(|document| {
-        let Some((rf, refiner)) = document.refining.as_mut() else {
+        let (Some(rf), Some(refiner)) = (document.file.as_mut(), document.refiner.as_mut()) else {
             return Err(JsValue::from_str("no saved-mesh pass running"));
         };
         let entities: Vec<usize> = entities.iter().map(|&e| e as usize).collect();
@@ -278,7 +294,8 @@ pub fn document_refine_batch(entities: &[u32]) -> Result<JsValue, JsValue> {
         let report = refiner.report.clone();
         let finished = refiner.is_done();
         if finished {
-            document.refining = None;
+            document.refiner = None;
+            document.file = None;
         }
         let mut bodies = Vec::new();
         let (mut shapes, mut placements) = (Vec::new(), Vec::new());

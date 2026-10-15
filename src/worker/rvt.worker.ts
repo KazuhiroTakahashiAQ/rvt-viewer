@@ -22,6 +22,7 @@ import init, {
   documentPlanSvg,
   documentRefineBatch,
   documentRefineBegin,
+  documentReleaseFile,
   documentScene,
   documentSchedule,
   documentScheduleCsv,
@@ -85,6 +86,8 @@ async function open(bytes: Uint8Array, savedMeshes: boolean): Promise<void> {
     glb.buffer as ArrayBuffer,
   ]);
   refineWanted = savedMeshes;
+  // Nothing reads the file again.
+  if (!savedMeshes) documentReleaseFile();
 }
 
 // --- saved-mesh pass ---------------------------------------------------------
@@ -94,11 +97,14 @@ async function open(bytes: Uint8Array, savedMeshes: boolean): Promise<void> {
  * cost whatever its size, so batches start small, for the first bodies on
  * screen to show soon, and double up to MAX_BATCH; a new order from the
  * page starts them small again. A batch slower than SLOW_BATCH_MS halves
- * the next, for a new order to take effect soon.
+ * the next, for a new order to take effect soon. A batch holds the saved
+ * graphics of its elements and their symbols, hundreds of megabytes for
+ * 500 of them, and wasm memory never shrinks: at most 100 (Snowdon Towers:
+ * 1.3 GB of wasm memory in all instead of 1.8 GB, in about the same time).
  */
 const FIRST_BATCH = 24;
 const MIN_BATCH = 8;
-const MAX_BATCH = 500;
+const MAX_BATCH = 100;
 const SLOW_BATCH_MS = 3000;
 
 interface Refining {

@@ -1,5 +1,5 @@
 import { expect, type Page, test } from '@playwright/test';
-import { darkRatio, openSample } from './helpers';
+import { darkRatio, openSample, pixelDifference } from './helpers';
 
 const SAMPLE = process.env.RVT_SAMPLE;
 const SHOTS = process.env.RVT_SCREENSHOTS;
@@ -219,6 +219,35 @@ test.describe('with a sample model', () => {
       await expect(source).toContainText('保存済み表示メッシュ');
       await shot(page, '13-rpc');
     }
+    expect(errors).toEqual([]);
+  });
+
+  test('a transparency override shows the category through, and only while it is set', async ({ page }) => {
+    test.setTimeout(300_000);
+    const errors = collectErrors(page);
+    await page.goto('./');
+    await openSample(page, SAMPLE!);
+    await expect(page.locator('.view-tab.active')).toContainText('3D ビュー', { timeout: 90_000 });
+    await expect(page.locator('.statusbar')).not.toHaveAttribute('data-saved-meshes', 'pending', { timeout: 180_000 });
+    await page.mouse.move(5, 5);
+    await page.waitForTimeout(500);
+    const canvas = page.locator('.viewer-canvas');
+    const before = await canvas.screenshot();
+    const setWallTransparency = async (value: string) => {
+      await page.getByRole('button', { name: '表示/グラフィックス' }).first().click();
+      const dialog = page.getByRole('dialog');
+      const row = dialog.locator('.vg-row:not(.vg-head)', { hasText: /^\s*壁/ }).first();
+      await row.getByLabel('透過性').fill(value);
+      await dialog.getByRole('button', { name: 'OK' }).click();
+      await expect(dialog).toHaveCount(0);
+      await page.waitForTimeout(500);
+    };
+    await setWallTransparency('50');
+    const seeThrough = await canvas.screenshot();
+    await shot(page, '14-transparent-walls');
+    expect(pixelDifference(before, seeThrough), 'walls drawn see-through').toBeGreaterThan(0.0005);
+    await setWallTransparency('0');
+    expect(pixelDifference(before, await canvas.screenshot()), 'walls opaque again').toBeLessThan(0.0002);
     expect(errors).toEqual([]);
   });
 

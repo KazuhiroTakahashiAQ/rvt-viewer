@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { frontHalf, splitRuns } from '../../src/engine/ModelMesh';
+import { createFaceMaterial, createSharedUniforms, passVisible } from '../../src/engine/modelMaterials';
 
 /** A two-sided face set as rvt-rs writes it: the triangles, then each reversed. */
 function twoSided(vertices: number[], triangles: number[][]): THREE.BufferGeometry {
@@ -49,5 +50,20 @@ describe('frontHalf', () => {
     geometry.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0], 3));
     geometry.setIndex([0, 1, 2, 0, 2, 3]);
     expect(frontHalf(geometry)).toBeNull();
+  });
+});
+
+describe('passVisible', () => {
+  const uniforms = createSharedUniforms();
+  const color = new THREE.Color(0x808080);
+  it('draws an opaque batch once, in the opaque pass, unless opacity is overridden', () => {
+    expect(passVisible(createFaceMaterial(uniforms, color, 1, 0), false)).toBe(true);
+    expect(passVisible(createFaceMaterial(uniforms, color, 1, 1), false)).toBe(false);
+    expect(passVisible(createFaceMaterial(uniforms, color, 1, 1), true)).toBe(true);
+  });
+  it('draws a transparent batch in the transparent pass only', () => {
+    expect(passVisible(createFaceMaterial(uniforms, color, 0.3, 0), false)).toBe(false);
+    expect(passVisible(createFaceMaterial(uniforms, color, 0.3, 0), true)).toBe(false);
+    expect(passVisible(createFaceMaterial(uniforms, color, 0.3, 1), false)).toBe(true);
   });
 });

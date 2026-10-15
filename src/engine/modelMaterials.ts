@@ -170,10 +170,27 @@ export function createFaceMaterial(
       .replace('#include <tonemapping_fragment>', `${FACE_FINAL}\n#include <tonemapping_fragment>`);
   };
   material.customProgramCacheKey = () => `rvt-face-${pass}`;
+  // For `passVisible`.
+  material.userData.rvtPass = pass;
+  material.userData.rvtBaseAlpha = baseAlpha;
   return material;
 }
 
 /** `instanced`: for line segments drawn once per body by an `instanceMatrix` attribute. */
+/**
+ * Whether a mesh drawn with `material` (from `createFaceMaterial`) can draw
+ * anything: the opaque pass draws what is opaque, the transparent pass what
+ * is not. A body is transparent by its material (`baseAlpha` below 1) or by
+ * a per-element opacity override, which can only lower it. Hiding the pass
+ * that draws nothing saves drawing every triangle twice.
+ */
+export function passVisible(material: THREE.Material, overrides: boolean): boolean {
+  const { rvtPass, rvtBaseAlpha } = material.userData as { rvtPass?: 0 | 1; rvtBaseAlpha?: number };
+  if (rvtPass === undefined || rvtBaseAlpha === undefined) return true;
+  const transparent = rvtBaseAlpha < 0.999;
+  return rvtPass === 0 ? !transparent : transparent || overrides;
+}
+
 export function createEdgeMaterial(shared: SharedUniforms, instanced = false): THREE.LineBasicMaterial {
   const material = new THREE.LineBasicMaterial({ color: 0x000000 });
   // Lines are not instanced meshes: three.js applies `instanceMatrix` on this define alone.

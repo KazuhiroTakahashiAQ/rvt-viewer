@@ -499,7 +499,7 @@ fn graphics_records(
             break;
         }
         options.selected_ids = std::mem::take(&mut wanted);
-        native_document::extract_graphs(rf, &options, |record| {
+        native_document::extract_graphs_selected(rf, &options, |record| {
             if record.channel == MATERIAL_CHANNEL {
                 return material(record);
             }
