@@ -1,0 +1,5 @@
+# The rvt-rs this viewer is built with: a fork of DrunkOnJava/rvt-rs with
+# fixes the viewer needs, checked out beside this repository as ../rvt-rs.
+# scripts/build-wasm.sh and CI read these two lines.
+repository=KazuhiroTakahashiAQ/rvt-rs
+commit=cd57bf373cbdb77529838bddf7ccdc150181e4cf

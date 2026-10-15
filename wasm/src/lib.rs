@@ -1,6 +1,6 @@
 //! WebAssembly bindings of rvt-rs for rvt-viewer.
 //!
-//! The functions the viewer calls are the ones of `vendor/rvt-rs/rvt-wasm`
+//! The functions the viewer calls are the ones of `rvt-rs/rvt-wasm`
 //! (same names, same JS values in and out), copied here so one module can
 //! also expose [`attach_saved_meshes`]: rvt-rs can draw doors, windows and
 //! other loadable families from the meshes Revit saved for display

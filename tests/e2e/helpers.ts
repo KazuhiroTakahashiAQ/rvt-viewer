@@ -1,13 +1,27 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import type { Page } from '@playwright/test';
 
+/** Files above this go through the file input: a drop carries the bytes through the page. */
+const DROP_LIMIT_BYTES = 50 * 1024 * 1024;
+
 /**
- * Opens a local Revit file in the app by serving it from a same-origin URL
- * (via request interception) and dropping it onto the window.
+ * Opens a local Revit file in the app: dropped onto the window (served from
+ * a same-origin URL via request interception), or for a large file chosen
+ * through the "Open" button's file input, which Playwright hands the path.
  */
 export async function openSample(page: Page, path: string): Promise<void> {
+  if (statSync(path).size > DROP_LIMIT_BYTES) {
+    // The input is the fallback where the File System Access picker is missing.
+    await page.evaluate(() => {
+      delete (window as unknown as { showOpenFilePicker?: unknown }).showOpenFilePicker;
+    });
+    const chooser = page.waitForEvent('filechooser');
+    await page.getByRole('button', { name: '開く', exact: true }).first().click();
+    await (await chooser).setFiles(path);
+    return;
+  }
   const name = basename(path);
   const url = `/rvt-viewer/__e2e__/${encodeURIComponent(name)}`;
   await page.route(`**${url}`, (route) =>

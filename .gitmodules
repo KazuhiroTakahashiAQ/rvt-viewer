@@ -1,3 +1,0 @@
-[submodule "vendor/rvt-rs"]
-	path = vendor/rvt-rs
-	url = https://github.com/DrunkOnJava/rvt-rs.git

@@ -1,6 +1,6 @@
 /*
  * TypeScript shapes of the values the rvt-rs WebAssembly bindings
- * (vendor/rvt-rs/rvt-wasm) hand back through serde-wasm-bindgen.
+ * (rvt-rs/rvt-wasm) hand back through serde-wasm-bindgen.
  *
  * Conventions of that bridge:
  * - Rust `BTreeMap`s arrive as JS `Map`s (keys stay numbers when the Rust key is numeric).

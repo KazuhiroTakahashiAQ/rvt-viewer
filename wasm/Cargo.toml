@@ -11,7 +11,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-rvt = { path = "../vendor/rvt-rs" }
+rvt = { path = "../../rvt-rs" }
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
 serde = { version = "1", features = ["derive"] }
@@ -19,17 +19,17 @@ serde_json = "1"
 anyhow = "1"
 earcut = "0.4"
 
-# Standalone: not a member of vendor/rvt-rs' workspace.
+# Standalone: not a member of rvt-rs' workspace.
 [workspace]
 
-# Same as vendor/rvt-rs' release profile.
+# Same as rvt-rs' release profile.
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
 
 # wasm-pack 0.15's bundled wasm-opt rejects rustc's bulk-memory output
-# (see vendor/rvt-rs/rvt-wasm/Cargo.toml); ship wasm-bindgen's output as is.
+# (see rvt-rs/rvt-wasm/Cargo.toml); ship wasm-bindgen's output as is.
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
 

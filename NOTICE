@@ -5,8 +5,10 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 This product includes software developed as part of rvt-rs
 (https://github.com/DrunkOnJava/rvt-rs), licensed under the Apache
-License, Version 2.0, compiled to WebAssembly from the pinned commit in
-vendor/rvt-rs. The rvt-rs NOTICE file is reproduced below.
+License, Version 2.0, compiled to WebAssembly from the commit of the fork
+https://github.com/KazuhiroTakahashiAQ/rvt-rs that rvt-rs.ref pins. The
+fork changes rvt-rs's files (see its history). The rvt-rs NOTICE file is
+reproduced below.
 
 "Autodesk" and "Revit" are registered trademarks of Autodesk, Inc.
 rvt-viewer is not affiliated with, endorsed by, or sponsored by
