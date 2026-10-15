@@ -26,6 +26,39 @@ interface Batch {
   color: THREE.Color;
   opacity: number;
   items: SourceMesh[];
+  triangles: number;
+}
+
+/**
+ * Triangles of one merged mesh, at most: a batch of one material is split
+ * so that no single merge or BVH build blocks the page for long.
+ */
+const MAX_BATCH_TRIANGLES = 400_000;
+
+/** Work between yields to the browser, milliseconds. */
+const SLICE_MS = 12;
+
+/** Let the browser handle input and paint before going on. */
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Yields every [`SLICE_MS`] of work, reporting the share done as it does. */
+class Slicer {
+  private last = performance.now();
+
+  constructor(private readonly onProgress?: (fraction: number) => void) {}
+
+  async at(fraction: number): Promise<void> {
+    if (performance.now() - this.last < SLICE_MS) return;
+    this.onProgress?.(Math.min(1, fraction));
+    await yieldToBrowser();
+    this.last = performance.now();
+  }
+}
+
+function triangleCount(geometry: THREE.BufferGeometry): number {
+  return (geometry.index ? geometry.index.count : geometry.getAttribute('position').count) / 3;
 }
 
 export interface ModelHit {
@@ -47,48 +80,83 @@ export class ModelMesh {
     this.root.name = 'rvt-model';
   }
 
+  /**
+   * Build from `glb`, yielding to the browser every few milliseconds so the
+   * page stays responsive, and reporting the share done (0..1).
+   */
   static async fromGlb(
     glb: Uint8Array,
     entityCount: number,
     uniforms: SharedUniforms,
     materials: BodyMaterials[] = [],
+    onProgress?: (fraction: number) => void,
   ): Promise<ModelMesh> {
     const model = new ModelMesh(entityCount);
-    const buffer = glb.buffer.slice(glb.byteOffset, glb.byteOffset + glb.byteLength) as ArrayBuffer;
+    // The GLB of a large model is hundreds of megabytes: no copy where it
+    // is its buffer's only content.
+    const buffer =
+      glb.byteOffset === 0 && glb.byteLength === glb.buffer.byteLength
+        ? (glb.buffer as ArrayBuffer)
+        : (glb.buffer.slice(glb.byteOffset, glb.byteOffset + glb.byteLength) as ArrayBuffer);
     const gltf = await new GLTFLoader().parseAsync(buffer, '');
     gltf.scene.updateMatrixWorld(true);
-    model.build(gltf.scene, uniforms, new Map(materials.map((m) => [m.entity, m.runs])));
-    disposeScene(gltf.scene);
+    try {
+      await model.build(gltf.scene, uniforms, new Map(materials.map((m) => [m.entity, m.runs])), onProgress);
+    } catch (err) {
+      model.dispose();
+      throw err;
+    } finally {
+      disposeScene(gltf.scene);
+    }
     return model;
   }
 
-  private build(scene: THREE.Object3D, uniforms: SharedUniforms, runs: Map<number, MaterialRun[]>): void {
-    const batches = new Map<string, Batch>();
+  private async build(
+    scene: THREE.Object3D,
+    uniforms: SharedUniforms,
+    runs: Map<number, MaterialRun[]>,
+    onProgress?: (fraction: number) => void,
+  ): Promise<void> {
+    const meshes: THREE.Mesh[] = [];
+    scene.traverse((obj) => {
+      if ((obj as THREE.Mesh).isMesh) meshes.push(obj as THREE.Mesh);
+    });
+    // Collecting and finding edges is about half the work; merging and
+    // indexing the batches the other half.
+    const slicer = new Slicer(onProgress);
+    const batches = new Map<string, Batch[]>();
     const edgeCache = new Map<string, Float32Array>();
     const edgeChunks: { positions: Float32Array; matrix: THREE.Matrix4; entity: number }[] = [];
     const parts: THREE.BufferGeometry[] = [];
     const add = (color: THREE.Color, opacity: number, item: SourceMesh) => {
       const key = `${color.getHexString()}-${opacity.toFixed(3)}`;
-      let batch = batches.get(key);
-      if (!batch) {
-        batch = { color, opacity, items: [] };
-        batches.set(key, batch);
+      const list = batches.get(key) ?? [];
+      batches.set(key, list);
+      const triangles = triangleCount(item.geometry);
+      let batch = list.at(-1);
+      if (!batch || (batch.items.length > 0 && batch.triangles + triangles > MAX_BATCH_TRIANGLES)) {
+        batch = { color, opacity, items: [], triangles: 0 };
+        list.push(batch);
       }
       batch.items.push(item);
+      batch.triangles += triangles;
     };
 
-    scene.traverse((obj) => {
-      const mesh = obj as THREE.Mesh;
-      if (!mesh.isMesh) return;
+    for (const [i, mesh] of meshes.entries()) {
+      await slicer.at((0.5 * i) / meshes.length);
       const entity = entityIndexOf(mesh);
-      if (entity === null) return;
+      if (entity === null) continue;
       const material = (Array.isArray(mesh.material) ? mesh.material[0] : mesh.material) as
         | THREE.MeshStandardMaterial
         | undefined;
       const color = material?.color?.clone() ?? new THREE.Color(0xb2b4b8);
       const opacity = material?.transparent ? (material.opacity ?? 1) : 1;
       const matrix = mesh.matrixWorld.clone();
-      const split = runs.has(entity) ? splitByRuns(mesh.geometry, runs.get(entity)!) : null;
+      // A face set comes two-sided: drawn double-sided, one winding does.
+      const front = frontHalf(mesh.geometry);
+      if (front) parts.push(front);
+      const geometry = front ?? mesh.geometry;
+      const split = runs.has(entity) ? splitByRuns(geometry, runs.get(entity)!) : null;
       if (split) {
         for (const part of split) {
           parts.push(part.geometry);
@@ -96,26 +164,41 @@ export class ModelMesh {
           add(own, part.opacity < 1 ? part.opacity : opacity, { geometry: part.geometry, matrix, entity });
         }
       } else {
-        add(color, opacity, { geometry: mesh.geometry, matrix, entity });
+        add(color, opacity, { geometry, matrix, entity });
       }
 
       let edges = edgeCache.get(mesh.geometry.uuid);
       if (!edges) {
-        const eg = new THREE.EdgesGeometry(frontHalf(mesh.geometry) ?? mesh.geometry, EDGE_THRESHOLD_DEG);
+        const eg = new THREE.EdgesGeometry(geometry, EDGE_THRESHOLD_DEG);
         edges = eg.getAttribute('position').array as Float32Array;
         eg.dispose();
         edgeCache.set(mesh.geometry.uuid, edges);
       }
       edgeChunks.push({ positions: edges, matrix, entity });
-    });
+    }
 
+    const all = [...batches.values()].flat();
+    const totalItems = Math.max(1, all.reduce((n, b) => n + b.items.length, 0));
+    let merged = 0;
     const volumeCache = new Map<string, number>();
-    for (const batch of batches.values()) this.buildBatch(batch, uniforms, volumeCache);
+    for (const batch of all) {
+      await this.buildBatch(batch, uniforms, volumeCache, async (items) => {
+        await slicer.at(0.5 + (0.48 * (merged + items)) / totalItems);
+      });
+      merged += batch.items.length;
+    }
+    await slicer.at(0.98);
     this.buildEdges(edgeChunks, uniforms);
     for (const part of parts) part.dispose();
+    onProgress?.(1);
   }
 
-  private buildBatch(batch: Batch, uniforms: SharedUniforms, volumeCache: Map<string, number>): void {
+  private async buildBatch(
+    batch: Batch,
+    uniforms: SharedUniforms,
+    volumeCache: Map<string, number>,
+    progress: (items: number) => Promise<void>,
+  ): Promise<void> {
     let vertexCount = 0;
     let indexCount = 0;
     for (const item of batch.items) {
@@ -130,7 +213,8 @@ export class ModelMesh {
     let vOffset = 0;
     let iOffset = 0;
 
-    for (const item of batch.items) {
+    for (const [k, item] of batch.items.entries()) {
+      await progress(k);
       const pos = item.geometry.getAttribute('position');
       const box = this.boxFor(item.entity);
       for (let i = 0; i < pos.count; i++) {
@@ -159,6 +243,7 @@ export class ModelMesh {
       vOffset += pos.count;
       iOffset += n;
     }
+    await progress(batch.items.length);
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));

@@ -164,8 +164,13 @@ export class Viewer {
 
   // --- model ------------------------------------------------------------
 
-  async loadModel(glb: Uint8Array, entityCount: number, meta: EntityMeta): Promise<void> {
-    const mesh = await ModelMesh.fromGlb(glb, entityCount, this.uniforms);
+  async loadModel(
+    glb: Uint8Array,
+    entityCount: number,
+    meta: EntityMeta,
+    onProgress?: (fraction: number) => void,
+  ): Promise<void> {
+    const mesh = await ModelMesh.fromGlb(glb, entityCount, this.uniforms, [], onProgress);
     if (this.disposed) {
       mesh.dispose();
       return;
@@ -199,10 +204,14 @@ export class Viewer {
    * Swap in new bodies for the same entities (the saved-mesh pass): the
    * view, camera, selection and display settings stay as they are.
    */
-  async replaceGeometry(glb: Uint8Array, materials: BodyMaterials[] = []): Promise<void> {
+  async replaceGeometry(
+    glb: Uint8Array,
+    materials: BodyMaterials[] = [],
+    onProgress?: (fraction: number) => void,
+  ): Promise<void> {
     const old = this.model;
     if (!old) return;
-    const mesh = await ModelMesh.fromGlb(glb, old.state.count, this.uniforms, materials);
+    const mesh = await ModelMesh.fromGlb(glb, old.state.count, this.uniforms, materials, onProgress);
     if (this.disposed || this.model !== old) {
       mesh.dispose();
       return;

@@ -9,14 +9,16 @@ import {
   zoomPrevious,
   zoomSelection,
 } from '../../app/commands';
+import { documentSeq, requestSavedMeshes } from '../../app/document';
 import { setViewer } from '../../app/viewerBridge';
 import { Viewer } from '../../engine/Viewer';
 import { type DisplayConfig, type ModelViewConfig, UNASSIGNED_LEVEL } from '../../engine/types';
 import { FEET_TO_METRES } from '../../model/units';
 import { elementLabel } from '../../model/properties';
-import { type ViewSettings, useStore } from '../../state/store';
+import { type ViewSettings, type WorkStage, useStore } from '../../state/store';
 import type { ViewDef } from '../../model/views';
 import { ContextMenu, type MenuItem } from '../common/Menu';
+import { WorkProgressBar } from '../shell/WorkProgress';
 import { useEffectiveTheme } from '../useTheme';
 
 const BACKGROUNDS = { white: '#ffffff', black: '#1b1d21', gray: '#c8cbd0' } as const;
@@ -57,6 +59,8 @@ export function ModelViewHost({ visible }: { visible: boolean }) {
   const tooltipTimer = useRef<number | null>(null);
 
   const doc = useStore((s) => s.doc);
+  // The view is empty until the first build is done: show its progress there.
+  const building = useStore((s) => s.work?.stage === 'build-initial');
   const views = useStore((s) => s.views);
   const activeViewId = useStore((s) => s.activeViewId);
   const viewSettings = useStore((s) => s.viewSettings);
@@ -141,13 +145,28 @@ export function ModelViewHost({ visible }: { visible: boolean }) {
     const index = doc.index;
     setReady(false);
     useStore.getState().consumeGlb();
+    const seq = documentSeq();
+    const current = () => documentSeq() === seq;
     void viewer
-      .loadModel(glb, doc.model.entities.length, {
-        categoryOf: (e) => index.byIndex.get(e)?.category,
-        levelOf: (e) => index.byIndex.get(e)?.storeyIndex ?? UNASSIGNED_LEVEL,
+      .loadModel(
+        glb,
+        doc.model.entities.length,
+        {
+          categoryOf: (e) => index.byIndex.get(e)?.category,
+          levelOf: (e) => index.byIndex.get(e)?.storeyIndex ?? UNASSIGNED_LEVEL,
+        },
+        buildProgress('build-initial', current),
+      )
+      .then(() => {
+        if (!current()) return;
+        useStore.getState().setWork(null);
+        setReady(true);
+        // One heavy step at a time: the saved-mesh pass starts now.
+        requestSavedMeshes();
       })
-      .then(() => setReady(true))
       .catch((err: unknown) => {
+        if (!current()) return;
+        useStore.getState().setWork(null);
         useStore.getState().pushToast('error', t('error.geometry', { detail: err instanceof Error ? err.message : String(err) }));
       });
   }, [doc, t]);
@@ -158,9 +177,16 @@ export function ModelViewHost({ visible }: { visible: boolean }) {
     const viewer = viewerRef.current;
     if (!viewer || !ready || !refinedBody) return;
     useStore.getState().consumeRefinedBody();
-    void viewer.replaceGeometry(refinedBody.glb, refinedBody.materials).catch((err: unknown) => {
-      useStore.getState().pushToast('error', t('error.geometry', { detail: err instanceof Error ? err.message : String(err) }));
-    });
+    const seq = documentSeq();
+    const current = () => documentSeq() === seq;
+    void viewer
+      .replaceGeometry(refinedBody.glb, refinedBody.materials, buildProgress('build-refined', current))
+      .catch((err: unknown) => {
+        if (current()) useStore.getState().pushToast('error', t('error.geometry', { detail: err instanceof Error ? err.message : String(err) }));
+      })
+      .finally(() => {
+        if (current()) useStore.getState().setWork(null);
+      });
   }, [ready, refinedBody, t]);
 
   // Active view → camera, clipping, style.
@@ -282,7 +308,28 @@ export function ModelViewHost({ visible }: { visible: boolean }) {
         </div>
       ) : null}
       {menu ? <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} /> : null}
+      {building ? (
+        <div className="view-progress">
+          <WorkProgressBar className="card" />
+        </div>
+      ) : null}
     </div>
   );
 }
 
+/**
+ * A geometry build's progress for the progress bar, in whole percent, while
+ * its document is still the open one.
+ */
+function buildProgress(
+  stage: Extract<WorkStage, 'build-initial' | 'build-refined'>,
+  current: () => boolean,
+): (fraction: number) => void {
+  let last = -1;
+  return (fraction) => {
+    const done = Math.round(fraction * 100);
+    if (done === last || !current()) return;
+    last = done;
+    useStore.getState().setWork({ stage, done, total: 100 });
+  };
+}

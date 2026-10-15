@@ -33,7 +33,8 @@ RVT ビューアの対応範囲、既知の問題、Revit ファイルの解析�
 | `racadvancedsampleproject.rvt`（2025） | 2025 | 5,657 | 5,183 / 5,183 |
 | `rmebasicsampleproject.rvt`（2025） | 2025 | 6,754 | 6,023 / 6,023 |
 | `racbasicsampleproject.rvt`（2027） | 2027 | 0 | （要素なし） |
-| 利用者提供の Revit 2026 プロジェクト（158 MB、build 20250630、非公開） | 2026 | 7,922 | 読み込み失敗（[既知の問題](known-issues.md#大きなファイルは保存済み表示メッシュの読み込みが失敗するまたは終わらないことがある)） |
+| `Snowdon Towers Sample Architectural.rvt` | 2024 | 6,103 | 3,422 / 3,555 |
+| 利用者提供の Revit 2026 プロジェクト（158 MB、build 20250630、非公開） | 2026 | 7,922 | 6,578 / 6,646 |
 
 fork での修正（[解析でわかった事実](findings.md#fork-での-rvt-rs-の修正)）の前は、2027 のサンプルは開けず、利用者提供のプロジェクトは要素 0 件でした。
 
@@ -48,3 +49,4 @@ fork での修正（[解析でわかった事実](findings.md#fork-での-rvt-rs
   - 2025 `rmebasicsampleproject.rvt`: `037165e5d317667f3cc8b522b187b4a2025da5b8664ae3deb4ed0767180c8099`
   - 2026 `racbasicsampleproject.rvt`: `bc547fe94274a17abbea89330fcf8800b85652e0b8e25562b153c102af3d99dc`
   - 2027 `racbasicsampleproject.rvt`: `c9ce4d013b630028973e4549d3be4b38b3640641948b035680eeea7306491a01`
+- `Snowdon Towers Sample Architectural.rvt`（Revit 2024）: Autodesk の「Revit Sample Project Files」のページから入手。SHA-256 `33271010919acb2a0d0d040851393a511d86ea7fd9a1f4c054797ae03e5e44a1`

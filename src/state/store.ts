@@ -13,7 +13,7 @@ import type { ModelIndex } from '../model/modelIndex';
 import type { LengthUnit } from '../model/units';
 import { type ViewDef, initialViewId, listViews } from '../model/views';
 import type { BodyMaterials, ExportDiagnostics, FileMetadata, IfcModel, Schedule, Summary } from '../wasm/types';
-import type { LoadStep, SavedMeshReport } from '../worker/protocol';
+import type { LoadStep, RefineStage, SavedMeshReport } from '../worker/protocol';
 
 export interface LoadedDocument {
   fileName: string;
@@ -34,6 +34,19 @@ export interface LoadedDocument {
 }
 
 export type SavedMeshStatus = 'pending' | 'done' | 'failed' | 'off';
+
+/**
+ * The heavy work in progress, for the progress bar: building the first
+ * geometry on the page, then the saved-mesh pass's stages in the worker
+ * ([`RefineStage`]), then building its geometry on the page.
+ */
+export type WorkStage = 'build-initial' | RefineStage | 'build-refined';
+
+export interface WorkProgress {
+  stage: WorkStage;
+  done: number;
+  total: number;
+}
 
 export type LoadErrorCode = 'notRevit' | 'unsupportedVersion' | 'outOfMemory' | 'unknown';
 
@@ -115,6 +128,8 @@ interface State {
   propertiesFilter: CategoryKey | null;
   toasts: Toast[];
   prefs: Prefs;
+  /** Kept apart from `doc` so that progress updates re-render only the bars. */
+  work: WorkProgress | null;
 }
 
 interface Actions {
@@ -133,6 +148,7 @@ interface Actions {
     refined?: { model: IfcModel; index: ModelIndex; glb: Uint8Array; materials: BodyMaterials[] },
   ): void;
   consumeRefinedBody(): void;
+  setWork(work: WorkProgress | null): void;
 
   openView(id: string): void;
   activateView(id: string): void;
@@ -200,6 +216,7 @@ let toastSeq = 1;
 const initialDocState = {
   doc: null,
   loading: null,
+  work: null,
   views: [] as ViewDef[],
   openViews: [] as string[],
   activeViewId: null,
@@ -270,6 +287,7 @@ export const useStore = create<State & Actions>()(
           return { doc };
         }),
       consumeRefinedBody: () => set((s) => (s.doc ? { doc: { ...s.doc, refinedBody: null } } : {})),
+      setWork: (work) => set({ work }),
 
       openView: (id) =>
         set((s) => {

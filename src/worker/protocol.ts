@@ -15,7 +15,15 @@ export type LoadStep = 'init' | 'metadata' | 'parse' | 'scene' | 'geometry' | 's
 
 export type ToWorker =
   | { type: 'open'; bytes: Uint8Array; savedMeshes: boolean }
+  /** Start the saved-mesh pass: the page has drawn the first geometry. */
+  | { type: 'refine' }
   | { type: 'export'; requestId: number; kind: ExportKind };
+
+/**
+ * Stages of the saved-mesh pass: reading the saved materials, decoding the
+ * elements' saved graphics (`done` of `total` elements), writing the GLB.
+ */
+export type RefineStage = 'materials' | 'meshes' | 'glb';
 
 export interface ReadyPayload {
   model: IfcModel;
@@ -45,6 +53,7 @@ export type FromWorker =
   | { type: 'progress'; step: LoadStep }
   | { type: 'summary'; summary: Summary | null; metadata: FileMetadata | null }
   | ({ type: 'ready' } & ReadyPayload)
+  | { type: 'refine-progress'; stage: RefineStage; done: number; total: number }
   | { type: 'refined'; refined: RefinedPayload | null; report: SavedMeshReport | null; error?: string }
   | { type: 'export'; requestId: number; kind: ExportKind; data: Uint8Array | string | null; error?: string }
   | { type: 'error'; message: string };

@@ -1964,3 +1964,85 @@ select {
     grid-template-columns: 36px minmax(110px, 1fr) 90px 120px 50px;
   }
 }
+
+/* ---------------------------------------------------------- work progress */
+
+.work-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.work-progress-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-progress-track {
+  position: relative;
+  flex: none;
+  width: 96px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--border);
+}
+
+.work-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
+.work-progress-percent {
+  min-width: 3ch;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.view-progress {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.work-progress.card {
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 12%);
+}
+
+.work-progress.card .work-progress-track {
+  width: 220px;
+}
+
+.work-progress[data-indeterminate] .work-progress-track::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 55%), transparent);
+  animation: work-sweep 1.2s linear infinite;
+  content: '';
+}
+
+@keyframes work-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-progress[data-indeterminate] .work-progress-track::after {
+    animation: none;
+  }
+}

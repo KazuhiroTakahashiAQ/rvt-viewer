@@ -172,12 +172,20 @@ test.describe('with a sample model', () => {
     test.setTimeout(300_000);
     const errors = collectErrors(page);
     await page.goto('./');
+    // The saved-mesh pass shows its progress bar, however short it is.
+    await page.evaluate(() => {
+      new MutationObserver(() => {
+        if (document.querySelector('.statusbar .work-progress')) (window as unknown as { sawProgress: boolean }).sawProgress = true;
+      }).observe(document.body, { subtree: true, childList: true });
+    });
     await openSample(page, SAMPLE!);
     await expect(page.locator('.view-tab.active')).toContainText('3D ビュー', { timeout: 90_000 });
     await page.waitForTimeout(500);
     await shot(page, '10-boxes');
     await expect(page.locator('.statusbar')).toHaveAttribute('data-saved-meshes', 'done', { timeout: 180_000 });
-    await expect(page.locator('.status-busy')).toHaveCount(0);
+    await expect(page.locator('.status-busy')).toHaveCount(0, { timeout: 120_000 });
+    await expect(page.locator('.work-progress')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as { sawProgress?: boolean }).sawProgress)).toBe(true);
     await page.waitForTimeout(500);
     await shot(page, '11-saved-meshes');
 

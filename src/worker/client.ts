@@ -1,11 +1,22 @@
 import type { FileMetadata, Summary } from '../wasm/types';
-import type { ExportKind, FromWorker, LoadStep, ReadyPayload, RefinedPayload, SavedMeshReport, ToWorker } from './protocol';
+import type {
+  ExportKind,
+  FromWorker,
+  LoadStep,
+  ReadyPayload,
+  RefinedPayload,
+  RefineStage,
+  SavedMeshReport,
+  ToWorker,
+} from './protocol';
 
 export interface OpenCallbacks {
   onProgress: (step: LoadStep) => void;
   onSummary: (summary: Summary | null, metadata: FileMetadata | null) => void;
-  /** Draw boxed bodies from Revit's saved display meshes after `ready`. */
+  /** Draw boxed bodies from Revit's saved display meshes, on `startRefine()`. */
   savedMeshes: boolean;
+  /** The saved-mesh pass's stages. */
+  onRefineProgress: (stage: RefineStage, done: number, total: number) => void;
   /** After `ready`, when `savedMeshes`: the refined model, or null when nothing changed or it failed. */
   onRefined: (refined: RefinedPayload | null, report: SavedMeshReport | null, error?: string) => void;
 }
@@ -48,6 +59,9 @@ export class RvtWorkerClient {
             resolve(payload);
             break;
           }
+          case 'refine-progress':
+            if (this.worker === worker) callbacks.onRefineProgress(msg.stage, msg.done, msg.total);
+            break;
           case 'refined':
             if (this.worker === worker) callbacks.onRefined(msg.refined, msg.report, msg.error);
             break;
@@ -75,6 +89,11 @@ export class RvtWorkerClient {
       });
       this.post({ type: 'open', bytes, savedMeshes: callbacks.savedMeshes }, [bytes.buffer as ArrayBuffer]);
     });
+  }
+
+  /** Run the saved-mesh pass now (the worker ignores a second request). */
+  startRefine(): void {
+    this.post({ type: 'refine' });
   }
 
   export(kind: ExportKind): Promise<Uint8Array | string> {

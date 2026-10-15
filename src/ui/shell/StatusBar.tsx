@@ -2,6 +2,7 @@ import { Funnel, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { elementLabel } from '../../model/properties';
 import { useStore } from '../../state/store';
+import { WorkProgressBar } from './WorkProgress';
 
 export function StatusBar() {
   const { t } = useTranslation();
@@ -10,6 +11,7 @@ export function StatusBar() {
   const selection = useStore((s) => s.selection);
   const navMode = useStore((s) => s.navMode);
   const openDialog = useStore((s) => s.openDialog);
+  const working = useStore((s) => s.work !== null);
 
   let message = doc ? t('status.selectHint') : t('status.ready');
   if (navMode === 'pan') message = t('status.panMode');
@@ -22,13 +24,17 @@ export function StatusBar() {
 
   const confidence = doc?.diagnostics.confidence;
   return (
-    <footer className="statusbar" data-saved-meshes={doc?.savedMeshes.status}>
+    <footer className="statusbar" data-saved-meshes={doc?.savedMeshes.status} data-working={working}>
       <div className="status-message" aria-live="polite">
         {message}
       </div>
       {doc ? (
         <>
-          {doc.savedMeshes.status === 'pending' ? (
+          {working ? (
+            <div className="status-item status-busy">
+              <WorkProgressBar />
+            </div>
+          ) : doc.savedMeshes.status === 'pending' ? (
             <div className="status-item status-busy" title={t('savedMeshes.pendingTitle')}>
               <LoaderCircle size={12} className="spin" />
               <span>{t('savedMeshes.pending')}</span>

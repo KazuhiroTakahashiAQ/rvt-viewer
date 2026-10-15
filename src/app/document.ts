@@ -38,6 +38,9 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
       onRefined: (refined, report, error) => {
         if (seq === openSeq) savedMeshesDone(refined, report, error);
       },
+      onRefineProgress: (stage, done, total) => {
+        if (seq === openSeq) useStore.getState().setWork({ stage, done, total });
+      },
       onProgress: (step) => {
         if (seq === openSeq) useStore.getState().setLoadStep(step);
       },
@@ -65,6 +68,8 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
       savedMeshes: { status: savedMeshes ? 'pending' : 'off', report: null },
       refinedBody: null,
     });
+    // Without geometry no view draws a first model to wait for.
+    if (!hasGeometry) requestSavedMeshes();
   } catch (err) {
     if (seq !== openSeq) return;
     client.close();
@@ -73,9 +78,27 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
   }
 }
 
+/** Changes with every document opened or closed, to tell late work apart. */
+export function documentSeq(): number {
+  return openSeq;
+}
+
+/**
+ * Start the saved-mesh pass, once the first geometry is drawn: one heavy
+ * step at a time. A second call does nothing.
+ */
+export function requestSavedMeshes(): void {
+  const store = useStore.getState();
+  if (store.doc?.savedMeshes.status !== 'pending' || store.work) return;
+  store.setWork({ stage: 'materials', done: 0, total: 1 });
+  client.startRefine();
+}
+
 function savedMeshesDone(refined: RefinedPayload | null, report: SavedMeshReport | null, error?: string): void {
   const store = useStore.getState();
   if (!store.doc) return;
+  // With a new body the page's build takes over the bar.
+  if (!refined) store.setWork(null);
   if (error !== undefined) {
     store.savedMeshesDone('failed', null);
     store.pushToast('error', i18n.t('savedMeshes.failed', { detail: error }));
