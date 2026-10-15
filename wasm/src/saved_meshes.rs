@@ -55,13 +55,21 @@ pub struct MaterialRun {
     pub opacity: f32,
 }
 
-/// A body drawn from its saved mesh, as the page draws it: in glTF's frame
-/// (metres, Y up) like [`rvt::ifc::gltf::model_to_glb`]'s, wound outward
-/// (by its signed volume, as the page orients the GLB's bodies), with its
-/// crease edges.
+/// A body drawn from its saved mesh, as the page draws it: a shape placed
+/// in glTF's frame (metres, Y up) like [`rvt::ifc::gltf::model_to_glb`]'s.
+///
+/// Bodies of one [`shape`](Self::shape) are the same mesh in their
+/// placement's frame (instances of one family type, mostly): its mesh comes
+/// with the first of them only, wound outward (by its signed volume, as the
+/// page orients the GLB's bodies) and with its crease edges.
 pub struct Body {
     pub entity: usize,
-    /// `x, y, z` per vertex.
+    pub shape: u32,
+    /// The placement's origin (`x, y, z`) and its turn about +Y, radians:
+    /// the element's location and rotation about the model's Z axis.
+    pub placement: [f32; 4],
+    /// `x, y, z` per vertex, in the placement's frame; empty where the shape
+    /// came before.
     pub positions: Vec<f32>,
     /// Three vertex indices per triangle.
     pub triangles: Vec<u32>,
@@ -121,6 +129,8 @@ pub struct Refiner {
     ingested: HashSet<u64>,
     looks: Looks,
     drawn: HashMap<usize, Drawn>,
+    /// The shapes sent, by a hash of their mesh ([`shape_key`]).
+    shapes: HashMap<(u64, u64), u32>,
     /// Face keys no instance has resolved yet → the bodies drawn without.
     waiting: HashMap<FaceKey, Vec<usize>>,
     pub report: SavedMeshReport,
@@ -159,6 +169,7 @@ impl Refiner {
             ingested: HashSet::new(),
             looks: Looks::default(),
             drawn: HashMap::new(),
+            shapes: HashMap::new(),
             waiting: HashMap::new(),
             failures: BTreeMap::new(),
         })
@@ -247,7 +258,9 @@ impl Refiner {
                 }
             }
             let runs = material_runs(&keys, |key| self.looks.of(id, key));
-            batch.bodies.extend(body(model, index, runs.clone()));
+            batch
+                .bodies
+                .extend(body(model, index, runs.clone(), &mut self.shapes));
             self.drawn.insert(index, Drawn { id, keys, runs });
         }
         // Earlier bodies whose faces another instance has now resolved.
@@ -262,7 +275,9 @@ impl Refiner {
             let runs = material_runs(&drawn.keys, |key| self.looks.of(drawn.id, key));
             if runs != drawn.runs {
                 drawn.runs = runs.clone();
-                batch.bodies.extend(body(model, index, runs));
+                batch
+                    .bodies
+                    .extend(body(model, index, runs, &mut self.shapes));
             }
         }
         Ok(batch)
@@ -663,8 +678,13 @@ fn set_mesh(
 }
 
 /// Entity `index`'s face set (as [`set_mesh`] writes it) as the page draws
-/// it, or `None` where it has none.
-fn body(model: &IfcModel, index: usize, runs: Option<Vec<MaterialRun>>) -> Option<Body> {
+/// it, or `None` where it has none. `shapes` holds the shapes sent so far.
+fn body(
+    model: &IfcModel,
+    index: usize,
+    runs: Option<Vec<MaterialRun>>,
+    shapes: &mut HashMap<(u64, u64), u32>,
+) -> Option<Body> {
     let IfcEntity::BuildingElement {
         location_feet,
         rotation_radians,
@@ -679,34 +699,70 @@ fn body(model: &IfcModel, index: usize, runs: Option<Vec<MaterialRun>>) -> Optio
         return None;
     };
     let origin = location_feet.unwrap_or([0.0; 3]);
-    let (sin, cos) = rotation_radians
-        .filter(|r| r.is_finite())
-        .unwrap_or(0.0)
-        .sin_cos();
-    // The element's placement, then glTF's frame (`Z_UP_FEET_TO_Y_UP_METRES`).
-    let place = |p: [f64; 3]| -> [f32; 3] {
-        let x = origin[0] + cos * p[0] - sin * p[1];
-        let y = origin[1] + sin * p[0] + cos * p[1];
-        let z = origin[2] + p[2];
-        [(x * FOOT) as f32, (z * FOOT) as f32, (-y * FOOT) as f32]
-    };
+    let turn = rotation_radians.filter(|r| r.is_finite()).unwrap_or(0.0);
+    // The model's Z turn is glTF's Y turn (`Z_UP_FEET_TO_Y_UP_METRES`).
+    let placement = [
+        (origin[0] * FOOT) as f32,
+        (origin[2] * FOOT) as f32,
+        (-origin[1] * FOOT) as f32,
+        turn as f32,
+    ];
     let triangles: Vec<[u32; 3]> = triangles.iter().map(|t| [t.0, t.1, t.2]).collect();
-    let flip = signed_volume(vertices_feet, &triangles) < 0.0;
+    let fresh = shapes.len() as u32;
+    let shape = *shapes
+        .entry(shape_key(vertices_feet, &triangles))
+        .or_insert(fresh);
     let mut out = Body {
         entity: index,
-        positions: vertices_feet.iter().flat_map(|&p| place(p)).collect(),
-        triangles: triangles
-            .iter()
-            .flat_map(|&[a, b, c]| if flip { [a, c, b] } else { [a, b, c] })
-            .collect(),
+        shape,
+        placement,
+        positions: Vec::new(),
+        triangles: Vec::new(),
         edges: Vec::new(),
         runs,
     };
+    if shape != fresh {
+        return Some(out);
+    }
+    // In the placement's frame, in glTF's axes.
+    let local = |p: [f64; 3]| -> [f32; 3] {
+        [
+            (p[0] * FOOT) as f32,
+            (p[2] * FOOT) as f32,
+            (-p[1] * FOOT) as f32,
+        ]
+    };
+    let flip = signed_volume(vertices_feet, &triangles) < 0.0;
+    out.positions = vertices_feet.iter().flat_map(|&p| local(p)).collect();
+    out.triangles = triangles
+        .iter()
+        .flat_map(|&[a, b, c]| if flip { [a, c, b] } else { [a, b, c] })
+        .collect();
     for [a, b] in crease_edges(vertices_feet, &triangles) {
-        out.edges.extend(place(a));
-        out.edges.extend(place(b));
+        out.edges.extend(local(a));
+        out.edges.extend(local(b));
     }
     Some(out)
+}
+
+/// A mesh in its placement's frame, as a hash of its vertices to 1e-4
+/// feet and its triangles: bodies with one key draw the first's mesh.
+fn shape_key(vertices: &[P3], triangles: &[[u32; 3]]) -> (u64, u64) {
+    use std::hash::{Hash, Hasher};
+    let mut a = std::collections::hash_map::DefaultHasher::new();
+    let mut b = std::collections::hash_map::DefaultHasher::new();
+    // Two hashes of the same data, the second keyed apart.
+    0xA5u8.hash(&mut b);
+    for h in [&mut a, &mut b] {
+        vertices.len().hash(h);
+        for v in vertices {
+            for c in v {
+                ((c * 1e4).round() as i64).hash(h);
+            }
+        }
+        triangles.hash(h);
+    }
+    (a.finish(), b.finish())
 }
 
 const FOOT: f64 = 0.3048;

@@ -253,15 +253,17 @@ struct EntityRuns {
 }
 
 /// Draw the candidates among `entities` from their saved meshes. Returns
-/// `{ done, entities, vertexStarts, triangleStarts, edgeStarts, positions,
-/// triangles, edges, runs, report, finished }`: `done` the candidates taken
-/// (drawn or not); per body drawn (`entities`, new ones and earlier ones
-/// whose materials changed) its slice of `positions` (`x, y, z` in glTF's
-/// frame), `triangles` (vertex indices from its first vertex) and `edges`
-/// (segment end points), the slices' starts in vertices, triangles and
-/// segments with one more at the end; `runs` the `{ entity, runs }` of the
-/// bodies with a transparent face; `finished` once no candidate is left,
-/// when the file is closed.
+/// `{ done, entities, shapes, placements, vertexStarts, triangleStarts,
+/// edgeStarts, positions, triangles, edges, runs, report, finished }`:
+/// `done` the candidates taken (drawn or not); per body drawn (`entities`,
+/// new ones and earlier ones whose materials changed) its shape, its
+/// placement (origin `x, y, z` in glTF's frame and turn about +Y), and its
+/// shape's slices of `positions` (`x, y, z` in the placement's frame),
+/// `triangles` (vertex indices from its first vertex) and `edges` (segment
+/// end points), empty where the shape came before; the slices' starts in
+/// vertices, triangles and segments with one more at the end; `runs` the
+/// `{ entity, runs }` of the bodies with a transparent face; `finished`
+/// once no candidate is left, when the file is closed.
 #[wasm_bindgen(js_name = documentRefineBatch)]
 pub fn document_refine_batch(entities: &[u32]) -> Result<JsValue, JsValue> {
     install_panic_hook();
@@ -279,12 +281,15 @@ pub fn document_refine_batch(entities: &[u32]) -> Result<JsValue, JsValue> {
             document.refining = None;
         }
         let mut bodies = Vec::new();
+        let (mut shapes, mut placements) = (Vec::new(), Vec::new());
         let (mut vertex_starts, mut triangle_starts, mut edge_starts) =
             (vec![0u32], vec![0u32], vec![0u32]);
         let (mut positions, mut triangles, mut edges) = (Vec::new(), Vec::new(), Vec::new());
         let mut runs = Vec::new();
         for body in batch.bodies {
             bodies.push(body.entity as u32);
+            shapes.push(body.shape);
+            placements.extend_from_slice(&body.placement);
             positions.extend_from_slice(&body.positions);
             triangles.extend_from_slice(&body.triangles);
             edges.extend_from_slice(&body.edges);
@@ -304,6 +309,14 @@ pub fn document_refine_batch(entities: &[u32]) -> Result<JsValue, JsValue> {
             (
                 "entities",
                 &js_sys::Uint32Array::from(bodies.as_slice()).into(),
+            ),
+            (
+                "shapes",
+                &js_sys::Uint32Array::from(shapes.as_slice()).into(),
+            ),
+            (
+                "placements",
+                &js_sys::Float32Array::from(placements.as_slice()).into(),
             ),
             (
                 "vertexStarts",

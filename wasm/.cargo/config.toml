@@ -1,0 +1,6 @@
+# WebAssembly SIMD (simd128): memchr's substring search and simd-adler32,
+# which rvt-rs's parse spends most of its time in, have SIMD versions for
+# it and fall back to slow scalar code without. Every current browser runs
+# it (Chrome 91, Firefox 89, Safari 16.4).
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

@@ -173,8 +173,11 @@ export function createFaceMaterial(
   return material;
 }
 
-export function createEdgeMaterial(shared: SharedUniforms): THREE.LineBasicMaterial {
+/** `instanced`: for line segments drawn once per body by an `instanceMatrix` attribute. */
+export function createEdgeMaterial(shared: SharedUniforms, instanced = false): THREE.LineBasicMaterial {
   const material = new THREE.LineBasicMaterial({ color: 0x000000 });
+  // Lines are not instanced meshes: three.js applies `instanceMatrix` on this define alone.
+  if (instanced) material.defines = { USE_INSTANCING: '' };
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, shared, {
       uRvtPass: { value: 0 },
@@ -185,6 +188,6 @@ export function createEdgeMaterial(shared: SharedUniforms): THREE.LineBasicMater
       .replace('#include <common>', `#include <common>\n${FRAGMENT_HEAD}`)
       .replace('#include <tonemapping_fragment>', `${EDGE_FINAL}\n#include <tonemapping_fragment>`);
   };
-  material.customProgramCacheKey = () => 'rvt-edge';
+  material.customProgramCacheKey = () => (instanced ? 'rvt-edge-instanced' : 'rvt-edge');
   return material;
 }

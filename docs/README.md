@@ -18,7 +18,7 @@ RVT ビューアの対応範囲、既知の問題、Revit ファイルの解析�
 | 2027 | ファイル情報（メタデータ）のみ（要素は rvt-rs が未対応） | 確認済み（1 ファイル） |
 | ファミリ（`.rfa`）・テンプレート（`.rte` / `.rft`） | ファイル情報のみ（ファミリ形状は未対応） | 未確認（rvt-rs の記載による） |
 
-ブラウザは Chromium 系（Chrome / Edge）でのみ確認しています。
+ブラウザは Chromium 系（Chrome / Edge）でのみ確認しています。WebAssembly の SIMD が必要です（Chrome 91・Firefox 89・Safari 16.4 以降）。
 
 ## 確認に使ったファイル
 

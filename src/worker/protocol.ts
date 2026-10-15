@@ -49,17 +49,23 @@ export interface SavedMeshReport {
 }
 
 /**
- * Bodies drawn from saved meshes, replacing the boxes of their entities:
- * per body (`entities`) its slices of `positions` (x, y, z in the GLB's
- * frame), `triangles` (indices from the body's first vertex, wound outward)
- * and `edges` (segment end points), from `*Starts[i]` to `*Starts[i + 1]`
- * in vertices, triangles and segments. A body can come again when its
- * materials change.
+ * Bodies drawn from saved meshes, replacing the boxes of their entities.
+ * Per body (`entities`): its shape (`shapes`; bodies of one shape are the
+ * same mesh in their placement's frame), its placement (`placements`, four
+ * a body: origin x, y, z in the GLB's frame and turn about +Y), and, where
+ * the shape comes for the first time, the shape's slices of `positions`
+ * (x, y, z in the placement's frame), `triangles` (indices from the
+ * shape's first vertex, wound outward) and `edges` (segment end points),
+ * from `*Starts[i]` to `*Starts[i + 1]` in vertices, triangles and
+ * segments; empty slices after. A body can come again when its materials
+ * change.
  */
 export interface RefinePatch {
   /** The candidates the batch took, drawn or not. */
   done: Uint32Array;
   entities: Uint32Array;
+  shapes: Uint32Array;
+  placements: Float32Array;
   vertexStarts: Uint32Array;
   triangleStarts: Uint32Array;
   edgeStarts: Uint32Array;
@@ -71,6 +77,12 @@ export interface RefinePatch {
   report: SavedMeshReport;
   /** No candidate is left. */
   finished: boolean;
+  /**
+   * What the next batch draws: candidates on screen (made ahead, sent as
+   * soon as the page asks), the others (made only once the page asks, which
+   * it does when the user leaves the view alone), or nothing.
+   */
+  next: 'screen' | 'rest' | 'none';
 }
 
 export type FromWorker =
@@ -90,6 +102,8 @@ export function patchBuffers(patch: RefinePatch): ArrayBuffer[] {
   return [
     patch.done,
     patch.entities,
+    patch.shapes,
+    patch.placements,
     patch.vertexStarts,
     patch.triangleStarts,
     patch.edgeStarts,

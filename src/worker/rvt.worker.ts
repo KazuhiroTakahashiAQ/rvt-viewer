@@ -12,7 +12,8 @@
  * page's `refine-begin`, sent once it has drawn the first geometry. It then
  * draws the boxed elements a batch at a time in the order the page asks
  * for (what is on screen first), one patch ahead of the page: the next is
- * sent when the page has drawn the last.
+ * sent when the page has drawn the last. The elements off screen are drawn
+ * only when the page asks for them, without working ahead.
  */
 
 import init, {
@@ -152,11 +153,23 @@ function refineBegin(): void {
   }
 }
 
+/** Move the cursor past the candidates taken. */
+function skipTaken(r: Refining): void {
+  while (r.cursor < r.order.length && r.taken[r.order[r.cursor]!]) r.cursor++;
+}
+
+/** What the next batch draws ([`RefinePatch.next`]). */
+function nextTier(r: Refining): RefinePatch['next'] {
+  skipTaken(r);
+  if (r.cursor < r.visible) return 'screen';
+  if (r.cursor < r.order.length) return 'rest';
+  return r.candidates.some((entity) => !r.taken[entity]) ? 'rest' : 'none';
+}
+
 /** The next batch: the first candidates of the order not taken, from one tier. */
 function nextBatch(r: Refining): number[] {
+  skipTaken(r);
   let at = r.cursor;
-  while (at < r.order.length && r.taken[r.order[at]!]) at++;
-  r.cursor = at;
   // On-screen candidates and the others go in batches of their own.
   const end = at < r.visible ? r.visible : r.order.length;
   const size = r.draining ? MAX_BATCH : r.size;
@@ -184,6 +197,7 @@ function makePatch(r: Refining): RefinePatch {
   if (batch.length === 0) patch.finished = true;
   const slow = performance.now() - started > SLOW_BATCH_MS;
   r.size = slow ? Math.max(MIN_BATCH, Math.round(r.size / 2)) : Math.min(MAX_BATCH, r.size * 2);
+  patch.next = patch.finished ? 'none' : nextTier(r);
   return patch;
 }
 
@@ -210,8 +224,9 @@ function refineStep(): void {
     refining = null;
     return;
   }
-  // The next one ahead, after the messages waiting (a new order, an ack).
-  if (!r.ahead) scheduleRefine(r);
+  // The next one ahead, after the messages waiting (a new order, an ack),
+  // where it is on screen: the others wait for the page.
+  if (!r.ahead && (r.draining || nextTier(r) === 'screen')) scheduleRefine(r);
 }
 
 function scheduleRefine(r: Refining): void {
@@ -261,7 +276,8 @@ self.addEventListener('message', (ev: MessageEvent<ToWorker>) => {
         refining.visible = msg.visible;
         refining.cursor = 0;
         refining.size = FIRST_BATCH;
-        if (!refining.awaitingAck) scheduleRefine(refining);
+        // A patch made ahead for the old order is still sent first.
+        if (!refining.ahead && (!refining.awaitingAck || nextTier(refining) === 'screen')) scheduleRefine(refining);
       }
       return;
     case 'refine-ack':

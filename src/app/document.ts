@@ -27,7 +27,15 @@ interface Refining {
   pending: Set<number>;
   /** What the last order put first, not to send the same again. */
   lastOrder: string;
+  /** Asks for the next patch now, while waiting to ask for one off screen. */
+  askNow: (() => void) | null;
 }
+
+/**
+ * The elements off screen are drawn once the user has left the view alone
+ * this long, ms: moving around draws only what comes into view.
+ */
+const OFFSCREEN_IDLE_MS = 1500;
 
 let refining: Refining | null = null;
 
@@ -139,6 +147,8 @@ function sendRefineOrder(r: Refining): void {
   if (head === r.lastOrder) return;
   r.lastOrder = head;
   client.refineOrder(order, visible);
+  // Something new on screen: no need to wait for the user to stop.
+  if (visible > 0) r.askNow?.();
 }
 
 function refineCandidates(seq: number, candidates: Uint32Array): void {
@@ -148,7 +158,7 @@ function refineCandidates(seq: number, candidates: Uint32Array): void {
     store.savedMeshesDone('done', { candidates: 0, replaced: 0, triangles: 0 });
     return;
   }
-  refining = { seq, total: candidates.length, done: 0, pending: new Set(candidates), lastOrder: '' };
+  refining = { seq, total: candidates.length, done: 0, pending: new Set(candidates), lastOrder: '', askNow: null };
   store.setWork({ stage: 'meshes', done: 0, total: candidates.length });
   sendRefineOrder(refining);
 }
@@ -170,7 +180,8 @@ function refinePatch(seq: number, patch: RefinePatch): void {
       store.markSavedMeshes(patch.entities);
       if (!patch.finished) {
         store.setWork({ stage: 'meshes', done: r.done, total: r.total });
-        client.refineAck();
+        if (patch.next === 'rest') askWhenIdle(r);
+        else client.refineAck();
         return;
       }
       refining = null;
@@ -178,6 +189,20 @@ function refinePatch(seq: number, patch: RefinePatch): void {
       store.savedMeshesDone('done', patch.report);
       void viewer?.finishPatches();
     });
+}
+
+/** Ask for the next patch, of elements off screen, once the user leaves the view alone. */
+function askWhenIdle(r: Refining): void {
+  let asked = false;
+  const ask = () => {
+    if (asked) return;
+    asked = true;
+    r.askNow = null;
+    if (refining === r) client.refineAck();
+  };
+  r.askNow = ask;
+  const viewer = getViewer();
+  void (viewer ? viewer.whenIdleFor(OFFSCREEN_IDLE_MS) : Promise.resolve()).then(ask);
 }
 
 function refineFailed(error: string): void {

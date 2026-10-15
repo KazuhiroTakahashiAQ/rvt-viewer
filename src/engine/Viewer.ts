@@ -17,7 +17,7 @@ import { pickPriority } from '../model/categories';
 import { CameraRig, type CameraPose, type Projection, anglesFromDirection, boxCorners, clonePose } from './CameraRig';
 import { FLAG_HALFTONE, FLAG_HOVER, FLAG_REVEALED, FLAG_SELECTED, FLAG_VISIBLE } from './EntityState';
 import { ModelMesh } from './ModelMesh';
-import { type SharedUniforms, createSharedUniforms, setVisualStyle } from './modelMaterials';
+import { type SharedUniforms, createEdgeMaterial, createFaceMaterial, createSharedUniforms, setVisualStyle } from './modelMaterials';
 import { SectionBox } from './SectionBox';
 import { type DisplayConfig, type ModelViewConfig, type NavMode, type SectionBoxState, type ThemeConfig, UNASSIGNED_LEVEL } from './types';
 import { ViewCube, type ViewCubeLabels } from './ViewCube';
@@ -113,6 +113,8 @@ export class Viewer {
   private dirty = true;
   private frame = 0;
   private lastWheel = 0;
+  /** When the user last moved the view. */
+  private lastActive = 0;
   private lastCamera = new THREE.Matrix4();
   private lastProjection = new THREE.Matrix4();
   /** When the view last changed, while `onViewSettled` is due. */
@@ -175,7 +177,49 @@ export class Viewer {
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
     this.resize();
+    this.warmUpPrograms();
     this.loop();
+  }
+
+  /** Kept so that the programs they compiled stay (three.js frees a program with its last material). */
+  private warmUp: { dispose(): void }[] = [];
+
+  /**
+   * Compile the model's shaders in the background (KHR_parallel_shader_compile)
+   * before anything is drawn with them: merged and instanced faces and edges.
+   * Compiling at the first draw stops the page for a moment.
+   */
+  private warmUpPrograms(): void {
+    const scene = new THREE.Scene();
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3));
+    geometry.setAttribute('aEntity', new THREE.Float32BufferAttribute([0, 0, 0], 1));
+    const instanced = new THREE.BufferGeometry();
+    instanced.setAttribute('position', geometry.getAttribute('position'));
+    instanced.setAttribute('aEntity', new THREE.InstancedBufferAttribute(new Float32Array(1), 1));
+    const lines = new THREE.InstancedBufferGeometry();
+    lines.setAttribute('position', geometry.getAttribute('position'));
+    lines.setAttribute('aEntity', new THREE.InstancedBufferAttribute(new Float32Array(1), 1));
+    lines.setAttribute('instanceMatrix', new THREE.InstancedBufferAttribute(new THREE.Matrix4().toArray(new Float32Array(16)), 16));
+    const color = new THREE.Color(0x808080);
+    const materials = [
+      createFaceMaterial(this.uniforms, color, 1, 0),
+      createFaceMaterial(this.uniforms, color, 1, 1),
+      createEdgeMaterial(this.uniforms),
+      createFaceMaterial(this.uniforms, color, 1, 0),
+      createFaceMaterial(this.uniforms, color, 1, 1),
+      createEdgeMaterial(this.uniforms, true),
+    ];
+    scene.add(
+      new THREE.Mesh(geometry, materials[0]),
+      new THREE.Mesh(geometry, materials[1]),
+      new THREE.LineSegments(geometry, materials[2]),
+      new THREE.InstancedMesh(instanced, materials[3], 1),
+      new THREE.InstancedMesh(instanced, materials[4], 1),
+      new THREE.LineSegments(lines, materials[5]),
+    );
+    this.warmUp = [geometry, instanced, lines, ...materials];
+    void this.renderer.compileAsync(scene, this.rig.camera, this.scene).catch(() => {});
   }
 
   // --- model ------------------------------------------------------------
@@ -272,6 +316,20 @@ export class Viewer {
       const check = () => {
         if (this.interacting && !this.disposed) requestAnimationFrame(check);
         else resolve();
+      };
+      requestAnimationFrame(check);
+    });
+  }
+
+  /**
+   * Resolves once the user has left the view alone for `ms` (never while
+   * the page is hidden: animation frames stop).
+   */
+  whenIdleFor(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (this.disposed || (!this.interacting && performance.now() - this.lastActive >= ms)) resolve();
+        else requestAnimationFrame(check);
       };
       requestAnimationFrame(check);
     });
@@ -668,6 +726,7 @@ export class Viewer {
     this.frame = requestAnimationFrame(this.loop);
     const now = performance.now();
     if (this.rig.tick(now)) this.dirty = true;
+    if (this.interacting) this.lastActive = now;
     if (this.viewChangedAt !== null && now - this.viewChangedAt > VIEW_SETTLE_MS && !this.interacting) {
       this.viewChangedAt = null;
       this.callbacks.onViewSettled?.();
@@ -1177,6 +1236,7 @@ export class Viewer {
     }
     this.sectionBox.dispose();
     this.viewCube.dispose();
+    for (const d of this.warmUp) d.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
     this.overlay.remove();

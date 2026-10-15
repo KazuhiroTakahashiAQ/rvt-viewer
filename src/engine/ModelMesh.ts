@@ -18,6 +18,7 @@ import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
 import type { MaterialRun } from '../wasm/types';
 import type { RefinePatch } from '../worker/protocol';
 import { EntityState } from './EntityState';
+import { InstanceGroup, type InstanceHit, type InstancePart } from './InstanceGroup';
 import { type SharedUniforms, createEdgeMaterial, createFaceMaterial } from './modelMaterials';
 
 const EDGE_THRESHOLD_DEG = 25;
@@ -92,6 +93,31 @@ interface Chunk {
 /** Chunks of one level merged into one of the next. */
 const MERGE_FAN_IN = 6;
 
+/**
+ * A saved-mesh shape: the mesh, in its placement's frame, that every body
+ * of it draws (instances of one family type, mostly).
+ */
+interface Shape {
+  positions: Float32Array;
+  indices: Uint32Array;
+  edges: Float32Array;
+  /** Entities drawn with it now. */
+  users: Set<number>;
+  /** Drawn by instancing rather than in the merged meshes. */
+  instanced: boolean;
+}
+
+/** A body drawn from a shape. */
+interface Placed {
+  shape: number;
+  matrix: THREE.Matrix4;
+  look: Look;
+  runs: MaterialRun[] | null;
+}
+
+/** Shapes instanced at most: each costs a few draw calls. */
+const MAX_INSTANCED_SHAPES = 128;
+
 interface Batch {
   color: THREE.Color;
   opacity: number;
@@ -157,6 +183,19 @@ export class ModelMesh {
   private readonly spans = new Map<number, Span[]>();
   private chunks: Chunk[] = [];
   private disposed = false;
+  private readonly shapes = new Map<number, Shape>();
+  private readonly placed = new Map<number, Placed>();
+  /** Instanced bodies by shape, look and runs. */
+  private readonly groups = new Map<string, InstanceGroup>();
+  private readonly slots = new Map<number, { group: InstanceGroup; slot: number }>();
+  private instancedShapes = 0;
+
+  /**
+   * A shape is drawn by instancing once that saves this many triangles
+   * (its triangles times its bodies but one): fewer, larger shapes, as each
+   * instanced one is a few more draw calls.
+   */
+  static instanceSaving = 10_000;
 
   private constructor(entityCount: number) {
     this.state = new EntityState(entityCount);
@@ -402,25 +441,49 @@ export class ModelMesh {
       await slicer.at();
       if (this.disposed) return;
       const entity = patch.entities[i]!;
-      const positions = patch.positions.subarray(patch.vertexStarts[i]! * 3, patch.vertexStarts[i + 1]! * 3);
+      const shapeId = patch.shapes[i]!;
       const indices = patch.triangles.subarray(patch.triangleStarts[i]! * 3, patch.triangleStarts[i + 1]! * 3);
-      if (indices.length === 0) continue;
-      this.retire(entity);
-      const look = this.looks.get(entity) ?? DEFAULT_LOOK;
-      const split = runs.has(entity) ? splitRuns(positions, indices, runs.get(entity)!) : null;
-      if (split) {
-        for (const part of split) {
-          const color = part.color ? new THREE.Color().setRGB(...part.color, THREE.SRGBColorSpace) : look.color;
-          const opacity = part.opacity < 1 ? part.opacity : look.opacity;
-          parts.push({ entity, look: { color, opacity }, positions: part.positions, indices: part.indices });
-        }
-      } else {
-        parts.push({ entity, look, positions, indices });
+      // The shape's mesh comes with its first body.
+      if (indices.length > 0) {
+        const positions = patch.positions.slice(patch.vertexStarts[i]! * 3, patch.vertexStarts[i + 1]! * 3);
+        this.shapes.set(shapeId, {
+          positions,
+          indices: indices.slice(),
+          edges: patch.edges.slice(patch.edgeStarts[i]! * 6, patch.edgeStarts[i + 1]! * 6),
+          users: new Set(),
+          instanced: false,
+        });
       }
-      edges.push({ entity, positions: patch.edges.subarray(patch.edgeStarts[i]! * 6, patch.edgeStarts[i + 1]! * 6) });
-      const box = new THREE.Box3().setFromArray(positions);
+      const shape = this.shapes.get(shapeId);
+      if (!shape) continue;
+      this.retire(entity);
+      const [x, y, z, turn] = patch.placements.subarray(i * 4, i * 4 + 4);
+      const matrix = new THREE.Matrix4().makeRotationY(turn!).setPosition(x!, y!, z!);
+      const placed: Placed = { shape: shapeId, matrix, look: this.looks.get(entity) ?? DEFAULT_LOOK, runs: runs.get(entity) ?? null };
+      this.placed.set(entity, placed);
+      shape.users.add(entity);
+      // From the vertices: a turned shape's box turned would be larger.
+      const box = placedBox(shape.positions, matrix);
       this.entityBoxes.set(entity, box);
       this.box.union(box);
+      if (!shape.instanced && this.shouldInstance(shape)) {
+        // From now on every body of the shape is instanced, the ones drawn already too.
+        shape.instanced = true;
+        this.instancedShapes++;
+        for (const other of shape.users) {
+          if (other === entity) continue;
+          this.collapse(other);
+          this.addInstance(other, uniforms);
+        }
+      }
+      if (shape.instanced) {
+        this.addInstance(entity, uniforms);
+        continue;
+      }
+      for (const part of shapeParts(shape, placed)) {
+        parts.push({ entity, look: part.look, positions: transformed(part.positions, matrix), indices: part.indices });
+      }
+      edges.push({ entity, positions: transformed(shape.edges, matrix) });
     }
     if (parts.length > 0) this.show(await this.buildChunk(parts, edges, 0, uniforms, slicer), []);
     for (let level = 0; ; level++) {
@@ -445,8 +508,56 @@ export class ModelMesh {
     return this.chunks.length;
   }
 
-  /** Hide `entity`'s current body: its vertices collapse onto its first. */
+  /** Instanced bodies drawn now, and the groups drawing them. */
+  get instanced(): { bodies: number; groups: number } {
+    let bodies = 0;
+    for (const g of this.groups.values()) bodies += g.count;
+    return { bodies, groups: this.groups.size };
+  }
+
+  private shouldInstance(shape: Shape): boolean {
+    const saving = (shape.users.size - 1) * (shape.indices.length / 3);
+    return saving >= ModelMesh.instanceSaving && this.instancedShapes < MAX_INSTANCED_SHAPES;
+  }
+
+  /** Draw `entity`'s placed body in the instance group of its shape, look and runs. */
+  private addInstance(entity: number, uniforms: SharedUniforms): void {
+    const placed = this.placed.get(entity)!;
+    const shape = this.shapes.get(placed.shape)!;
+    const key = `${placed.shape}|${lookKey(placed.look)}|${runsKey(placed.runs)}`;
+    let group = this.groups.get(key);
+    if (!group) {
+      const parts: InstancePart[] = shapeParts(shape, placed).map((p) => ({
+        positions: p.positions,
+        indices: p.indices,
+        color: p.look.color,
+        opacity: p.look.opacity,
+      }));
+      group = new InstanceGroup(parts, shape.edges, uniforms, Math.max(8, shape.users.size * 2));
+      this.groups.set(key, group);
+      this.root.add(group.root);
+    }
+    const slot = group.add(entity, placed.matrix, this.entityBoxes.get(entity)!);
+    this.slots.set(entity, { group, slot });
+  }
+
+  /** Hide `entity`'s current body, merged or instanced, and forget its shape. */
   private retire(entity: number): void {
+    this.collapse(entity);
+    const placed = this.placed.get(entity);
+    if (placed) {
+      this.shapes.get(placed.shape)?.users.delete(entity);
+      this.placed.delete(entity);
+    }
+  }
+
+  /** Stop drawing `entity`'s current body: its vertices collapse onto its first. */
+  private collapse(entity: number): void {
+    const slot = this.slots.get(entity);
+    if (slot) {
+      slot.group.remove(slot.slot);
+      this.slots.delete(entity);
+    }
     for (const span of this.spans.get(entity) ?? []) {
       const a = span.attribute.array as Float32Array;
       const s = span.start * 3;
@@ -647,18 +758,24 @@ export class ModelMesh {
     for (const mesh of this.pickMeshes) {
       raycaster.intersectObject(mesh, false, hits);
     }
-    const seen = new Set<number>();
-    const result: ModelHit[] = [];
-    hits.sort((a, b) => a.distance - b.distance);
+    const candidates: InstanceHit[] = [];
     for (const hit of hits) {
       const geometry = (hit.object as THREE.Mesh).geometry;
       const entityAttr = geometry.getAttribute('aEntity');
       if (!hit.face || !entityAttr) continue;
-      const entity = Math.round(entityAttr.getX(hit.face.a));
-      if (seen.has(entity) || !this.state.isVisible(entity)) continue;
+      candidates.push({ entity: Math.round(entityAttr.getX(hit.face.a)), point: hit.point, distance: hit.distance });
+    }
+    const visible = (e: number) => this.state.isVisible(e);
+    for (const group of this.groups.values()) group.raycast(raycaster.ray, visible, candidates);
+    const seen = new Set<number>();
+    const result: ModelHit[] = [];
+    candidates.sort((a, b) => a.distance - b.distance);
+    for (const hit of candidates) {
+      if (hit.distance < raycaster.near || hit.distance > raycaster.far) continue;
+      if (seen.has(hit.entity) || !this.state.isVisible(hit.entity)) continue;
       if (planes.some((p) => p.distanceToPoint(hit.point) < -1e-4)) continue;
-      seen.add(entity);
-      result.push({ entity, point: hit.point.clone(), distance: hit.distance });
+      seen.add(hit.entity);
+      result.push({ entity: hit.entity, point: hit.point.clone(), distance: hit.distance });
     }
     return result;
   }
@@ -667,6 +784,8 @@ export class ModelMesh {
     this.disposed = true;
     for (const d of this.disposables) d.dispose();
     for (const c of this.chunks) for (const d of c.disposables) d.dispose();
+    for (const g of this.groups.values()) g.dispose();
+    this.groups.clear();
     this.chunks = [];
     this.spans.clear();
     for (const m of this.pickMeshes) m.geometry.boundsTree = undefined;
@@ -760,6 +879,59 @@ export function splitRuns(
 
 function lookKey(look: Look): string {
   return `${look.color.getHexString()}-${look.opacity.toFixed(3)}`;
+}
+
+function runsKey(runs: MaterialRun[] | null): string {
+  return runs ? runs.map((r) => `${r.triangles}:${r.color?.join(',') ?? ''}:${r.opacity}`).join(';') : '';
+}
+
+/** A shape's triangles as `placed` draws them: in its runs' looks, or whole in its own. */
+function shapeParts(shape: Shape, placed: Placed): { positions: Float32Array; indices: Uint32Array; look: Look }[] {
+  const split = placed.runs ? splitRuns(shape.positions, shape.indices, placed.runs) : null;
+  if (!split) return [{ positions: shape.positions, indices: shape.indices, look: placed.look }];
+  return split.map((part) => ({
+    positions: part.positions,
+    indices: part.indices,
+    look: {
+      color: part.color ? new THREE.Color().setRGB(...part.color, THREE.SRGBColorSpace) : placed.look.color,
+      opacity: part.opacity < 1 ? part.opacity : placed.look.opacity,
+    },
+  }));
+}
+
+/** The box of `positions` (x, y, z each) moved by `matrix`. */
+function placedBox(positions: Float32Array, matrix: THREE.Matrix4): THREE.Box3 {
+  const e = matrix.elements;
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  for (let k = 0; k < positions.length; k += 3) {
+    const x = positions[k]!;
+    const y = positions[k + 1]!;
+    const z = positions[k + 2]!;
+    box.expandByPoint(
+      v.set(
+        e[0]! * x + e[4]! * y + e[8]! * z + e[12]!,
+        e[1]! * x + e[5]! * y + e[9]! * z + e[13]!,
+        e[2]! * x + e[6]! * y + e[10]! * z + e[14]!,
+      ),
+    );
+  }
+  return box;
+}
+
+/** `positions` (x, y, z each) moved by `matrix`, a turn about +Y and a translation. */
+export function transformed(positions: Float32Array, matrix: THREE.Matrix4): Float32Array {
+  const e = matrix.elements;
+  const out = new Float32Array(positions.length);
+  for (let k = 0; k < positions.length; k += 3) {
+    const x = positions[k]!;
+    const y = positions[k + 1]!;
+    const z = positions[k + 2]!;
+    out[k] = e[0]! * x + e[4]! * y + e[8]! * z + e[12]!;
+    out[k + 1] = e[1]! * x + e[5]! * y + e[9]! * z + e[13]!;
+    out[k + 2] = e[2]! * x + e[6]! * y + e[10]! * z + e[14]!;
+  }
+  return out;
 }
 
 function entityIndexOf(obj: THREE.Object3D): number | null {

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { ModelMesh } from '../../src/engine/ModelMesh';
+import { ModelMesh, transformed } from '../../src/engine/ModelMesh';
 import { createSharedUniforms } from '../../src/engine/modelMaterials';
 import type { RefinePatch } from '../../src/worker/protocol';
 
@@ -52,24 +52,45 @@ function cubesGlb(centres: [number, number, number][]): Uint8Array {
   return out;
 }
 
-/** A patch drawing each entity as one triangle around `centre` (in the XZ plane, facing +Y). */
-function trianglesPatch(bodies: { entity: number; centre: [number, number, number]; glass?: boolean }[]): RefinePatch {
+interface TestBody {
+  entity: number;
+  centre: [number, number, number];
+  /** Defaults to one of its own. */
+  shape?: number;
+  /** Send the shape's mesh (the first body of a shape does). */
+  mesh?: boolean;
+  glass?: boolean;
+  turn?: number;
+}
+
+let nextShape = 1000;
+
+/**
+ * A patch drawing each body as a quad of two triangles (in the XZ plane,
+ * facing +Y) placed at `centre`; the second triangle is glass where asked.
+ */
+function trianglesPatch(bodies: TestBody[]): RefinePatch {
   const positions: number[] = [];
   const triangles: number[] = [];
   const vertexStarts = [0];
   const triangleStarts = [0];
   const edgeStarts = [0];
   const edges: number[] = [];
+  const shapes: number[] = [];
+  const placements: number[] = [];
   const runs = [];
   for (const b of bodies) {
-    const [x, y, z] = b.centre;
-    // Two triangles: the second is the glass where asked.
-    positions.push(x - 0.2, y, z - 0.2, x + 0.2, y, z - 0.2, x + 0.2, y, z + 0.2, x - 0.2, y, z + 0.2);
-    triangles.push(0, 2, 1, 0, 3, 2);
-    edges.push(x - 0.2, y, z - 0.2, x + 0.2, y, z - 0.2);
+    const shape = b.shape ?? nextShape++;
+    if (b.mesh ?? b.shape === undefined) {
+      positions.push(-0.2, 0, -0.2, 0.2, 0, -0.2, 0.2, 0, 0.2, -0.2, 0, 0.2);
+      triangles.push(0, 2, 1, 0, 3, 2);
+      edges.push(-0.2, 0, -0.2, 0.2, 0, -0.2);
+    }
     vertexStarts.push(positions.length / 3);
     triangleStarts.push(triangles.length / 3);
     edgeStarts.push(edges.length / 6);
+    shapes.push(shape);
+    placements.push(...b.centre, b.turn ?? 0);
     if (b.glass) {
       runs.push({
         entity: b.entity,
@@ -83,6 +104,8 @@ function trianglesPatch(bodies: { entity: number; centre: [number, number, numbe
   return {
     done: Uint32Array.from(bodies.map((b) => b.entity)),
     entities: Uint32Array.from(bodies.map((b) => b.entity)),
+    shapes: Uint32Array.from(shapes),
+    placements: Float32Array.from(placements),
     vertexStarts: Uint32Array.from(vertexStarts),
     triangleStarts: Uint32Array.from(triangleStarts),
     edgeStarts: Uint32Array.from(edgeStarts),
@@ -92,6 +115,7 @@ function trianglesPatch(bodies: { entity: number; centre: [number, number, numbe
     runs,
     report: { candidates: bodies.length, replaced: bodies.length, triangles: 2 * bodies.length },
     finished: false,
+    next: 'none',
   };
 }
 
@@ -131,10 +155,55 @@ describe('ModelMesh patches', () => {
     });
     expect(looks.has('ff0000')).toBe(true);
     expect(hitAt(model, 6, 10)).toBe(2);
-    // Sent again elsewhere: the first patch's body no longer draws.
-    await model.applyPatch(trianglesPatch([{ entity: 2, centre: [6, 0, 20] }]), createSharedUniforms());
+    // Sent again elsewhere, its shape known: the first patch's body no longer draws.
+    await model.applyPatch(trianglesPatch([{ entity: 2, centre: [6, 0, 20], shape: 7, mesh: true }]), createSharedUniforms());
     expect(hitAt(model, 6, 10)).toBeNull();
     expect(hitAt(model, 6, 20)).toBe(2);
+    await model.applyPatch(trianglesPatch([{ entity: 2, centre: [6, 0, 30], shape: 7, mesh: false }]), createSharedUniforms());
+    expect(hitAt(model, 6, 20)).toBeNull();
+    expect(hitAt(model, 6, 30)).toBe(2);
+  });
+
+  it('draws the bodies of a shape by instancing once that saves enough', async () => {
+    const saving = ModelMesh.instanceSaving;
+    // Two triangles a shape: every second body saves enough here.
+    ModelMesh.instanceSaving = 2;
+    try {
+      const model = await ModelMesh.fromGlb(cubesGlb(centres), centres.length, createSharedUniforms());
+      await model.applyPatch(trianglesPatch([{ entity: 0, centre: [0, 0, 5], shape: 1, mesh: true }]), createSharedUniforms());
+      expect(model.instanced.bodies).toBe(0);
+      // The second body of the shape: both instanced, the first moved out of the merged meshes.
+      await model.applyPatch(
+        trianglesPatch([
+          { entity: 1, centre: [3, 0, 5], shape: 1, mesh: false },
+          { entity: 2, centre: [6, 0, 5], shape: 1, mesh: false, turn: Math.PI / 2 },
+        ]),
+        createSharedUniforms(),
+      );
+      expect(model.instanced).toEqual({ bodies: 3, groups: 1 });
+      expect(hitAt(model, 0, 5)).toBe(0);
+      expect(hitAt(model, 3, 5)).toBe(1);
+      expect(hitAt(model, 6, 5)).toBe(2);
+      expect(hitAt(model, 3, 0)).toBeNull();
+      expect(model.entityBoxes.get(2)!.min.x).toBeCloseTo(5.8);
+      // Glass in one body: a group of its own, in two looks.
+      await model.applyPatch(trianglesPatch([{ entity: 3, centre: [9, 0, 5], shape: 1, mesh: false, glass: true }]), createSharedUniforms());
+      expect(model.instanced).toEqual({ bodies: 4, groups: 2 });
+      expect(hitAt(model, 9, 5)).toBe(3);
+      // Sent again elsewhere: the old instance goes.
+      await model.applyPatch(trianglesPatch([{ entity: 0, centre: [0, 0, 15], shape: 1, mesh: false }]), createSharedUniforms());
+      expect(hitAt(model, 0, 5)).toBeNull();
+      expect(hitAt(model, 0, 15)).toBe(0);
+      expect(model.instanced.bodies).toBe(4);
+      // Many more bodies than the group's first room.
+      const many = Array.from({ length: 30 }, (_, k) => ({ entity: 4 + (k % 6), centre: [k, 0, 40] as [number, number, number], shape: 1, mesh: false }));
+      for (const body of many) await model.applyPatch(trianglesPatch([body]), createSharedUniforms());
+      expect(hitAt(model, 29, 40)).toBe(4 + (29 % 6));
+      expect(hitAt(model, 28, 40)).toBe(4 + (28 % 6));
+      model.dispose();
+    } finally {
+      ModelMesh.instanceSaving = saving;
+    }
   });
 
   it('merges patches a few at a time and keeps every body', async () => {
@@ -153,5 +222,13 @@ describe('ModelMesh patches', () => {
     await model.applyPatch(trianglesPatch([{ entity: 0, centre: [0, 0, 30] }]), createSharedUniforms());
     expect(hitAt(model, 0, 5)).toBeNull();
     expect(hitAt(model, 0, 30)).toBe(0);
+  });
+});
+
+describe('transformed', () => {
+  it('turns about +Y and moves, as the placements say', () => {
+    const m = new THREE.Matrix4().makeRotationY(Math.PI / 2).setPosition(1, 2, 3);
+    // +X turns to -Z (the model's +Y, a quarter turn about its Z).
+    expect(Array.from(transformed(Float32Array.from([1, 0, 0]), m)).map((v) => Math.round(v * 1e6) / 1e6)).toEqual([1, 2, 2]);
   });
 });
