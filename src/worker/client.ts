@@ -1,24 +1,18 @@
 import type { FileMetadata, Summary } from '../wasm/types';
-import type {
-  ExportKind,
-  FromWorker,
-  LoadStep,
-  ReadyPayload,
-  RefinedPayload,
-  RefineStage,
-  SavedMeshReport,
-  ToWorker,
-} from './protocol';
+import type { ExportKind, FromWorker, LoadStep, ReadyPayload, RefinePatch, RefineStage, ToWorker } from './protocol';
 
 export interface OpenCallbacks {
   onProgress: (step: LoadStep) => void;
   onSummary: (summary: Summary | null, metadata: FileMetadata | null) => void;
-  /** Draw boxed bodies from Revit's saved display meshes, on `startRefine()`. */
+  /** Draw boxed bodies from Revit's saved display meshes, on `refineBegin()`. */
   savedMeshes: boolean;
-  /** The saved-mesh pass's stages. */
+  /** The saved-mesh pass's stages before its patches. */
   onRefineProgress: (stage: RefineStage, done: number, total: number) => void;
-  /** After `ready`, when `savedMeshes`: the refined model, or null when nothing changed or it failed. */
-  onRefined: (refined: RefinedPayload | null, report: SavedMeshReport | null, error?: string) => void;
+  /** The pass's candidates; answer with `refineOrder()`. Empty when there is nothing to do. */
+  onRefineCandidates: (candidates: Uint32Array) => void;
+  /** Bodies to draw; answer with `refineAck()` once drawn. */
+  onRefinePatch: (patch: RefinePatch) => void;
+  onRefineFailed: (error: string) => void;
 }
 
 /**
@@ -62,8 +56,14 @@ export class RvtWorkerClient {
           case 'refine-progress':
             if (this.worker === worker) callbacks.onRefineProgress(msg.stage, msg.done, msg.total);
             break;
-          case 'refined':
-            if (this.worker === worker) callbacks.onRefined(msg.refined, msg.report, msg.error);
+          case 'refine-candidates':
+            if (this.worker === worker) callbacks.onRefineCandidates(msg.candidates);
+            break;
+          case 'refine-patch':
+            if (this.worker === worker) callbacks.onRefinePatch(msg.patch);
+            break;
+          case 'refine-failed':
+            if (this.worker === worker) callbacks.onRefineFailed(msg.error);
             break;
           case 'error':
             if (!settled) {
@@ -91,9 +91,19 @@ export class RvtWorkerClient {
     });
   }
 
-  /** Run the saved-mesh pass now (the worker ignores a second request). */
-  startRefine(): void {
-    this.post({ type: 'refine' });
+  /** Start the saved-mesh pass (the worker ignores a second request). */
+  refineBegin(): void {
+    this.post({ type: 'refine-begin' });
+  }
+
+  /** The candidates left, most wanted first; the first `visible` are on screen. */
+  refineOrder(order: Uint32Array, visible: number): void {
+    this.post({ type: 'refine-order', order, visible }, [order.buffer as ArrayBuffer]);
+  }
+
+  /** The last patch is drawn. */
+  refineAck(): void {
+    this.post({ type: 'refine-ack' });
   }
 
   export(kind: ExportKind): Promise<Uint8Array | string> {

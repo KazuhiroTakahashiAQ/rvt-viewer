@@ -3,14 +3,20 @@
  * handful of merged meshes — one per material — plus one merged edge
  * LineSegments. Per-element state lives in EntityState textures; picking
  * uses a BVH over the merged triangles and maps hits back to entities.
- * A saved-mesh body drawn in several of Revit's materials (a window's frame
- * and glass) is split into its material runs first.
+ *
+ * Bodies drawn from Revit's saved meshes arrive later, a patch at a time
+ * (`applyPatch`): an entity's earlier triangles and edges are collapsed to a
+ * point where they lie, and the patch is drawn as meshes of its own, merged
+ * with the other patches a few at a time so that draw calls stay few. A body
+ * drawn in several of Revit's materials (a window's frame and glass) is
+ * split into its material runs.
  */
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
-import type { BodyMaterials, MaterialRun } from '../wasm/types';
+import type { MaterialRun } from '../wasm/types';
+import type { RefinePatch } from '../worker/protocol';
 import { EntityState } from './EntityState';
 import { type SharedUniforms, createEdgeMaterial, createFaceMaterial } from './modelMaterials';
 
@@ -21,6 +27,70 @@ interface SourceMesh {
   matrix: THREE.Matrix4;
   entity: number;
 }
+
+/** An element's colour and opacity, as its GLB material gives them. */
+interface Look {
+  color: THREE.Color;
+  opacity: number;
+}
+
+const DEFAULT_LOOK: Look = { color: new THREE.Color(0xb2b4b8), opacity: 1 };
+
+/** Where one entity's vertices lie in a drawn buffer, to hide them when its body is replaced. */
+interface Span {
+  attribute: THREE.BufferAttribute;
+  start: number;
+  count: number;
+  /** The patch chunk drawing them; null for the first build. */
+  owner: Chunk | null;
+  item: { live: boolean } | null;
+}
+
+/** One entity's triangles (or a run of them) in one look, for a patch chunk. */
+interface Part {
+  entity: number;
+  look: Look;
+  /** x, y, z of the part's own vertices. */
+  positions: Float32Array;
+  /** Into `positions`, three a triangle. */
+  indices: Uint32Array;
+}
+
+interface PartEdges {
+  entity: number;
+  /** Segment end points. */
+  positions: Float32Array;
+}
+
+/** A part's place in a chunk's buffers. */
+interface ChunkItem {
+  entity: number;
+  look: Look;
+  start: number;
+  count: number;
+  indexStart: number;
+  indexCount: number;
+  live: boolean;
+}
+
+interface ChunkEdgeItem {
+  entity: number;
+  start: number;
+  count: number;
+  live: boolean;
+}
+
+/** One or more patches' bodies, drawn together. */
+interface Chunk {
+  /** How many merges it went through: chunks of one level merge together. */
+  level: number;
+  groups: { geometry: THREE.BufferGeometry; items: ChunkItem[]; meshes: THREE.Mesh[] }[];
+  edges: { geometry: THREE.BufferGeometry; lines: THREE.LineSegments; items: ChunkEdgeItem[] } | null;
+  disposables: { dispose(): void }[];
+}
+
+/** Chunks of one level merged into one of the next. */
+const MERGE_FAN_IN = 6;
 
 interface Batch {
   color: THREE.Color;
@@ -43,16 +113,23 @@ function yieldToBrowser(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/** Yields every [`SLICE_MS`] of work, reporting the share done as it does. */
+/**
+ * Yields every [`SLICE_MS`] of work, reporting the share done as it does,
+ * and waiting at `gate` (while the user moves the view) before going on.
+ */
 class Slicer {
   private last = performance.now();
 
-  constructor(private readonly onProgress?: (fraction: number) => void) {}
+  constructor(
+    private readonly onProgress?: (fraction: number) => void,
+    private readonly gate?: () => Promise<void>,
+  ) {}
 
-  async at(fraction: number): Promise<void> {
+  async at(fraction = 0): Promise<void> {
     if (performance.now() - this.last < SLICE_MS) return;
     this.onProgress?.(Math.min(1, fraction));
     await yieldToBrowser();
+    await this.gate?.();
     this.last = performance.now();
   }
 }
@@ -72,8 +149,14 @@ export class ModelMesh {
   readonly state: EntityState;
   readonly entityBoxes = new Map<number, THREE.Box3>();
   readonly box = new THREE.Box3();
-  private readonly pickMeshes: THREE.Mesh[] = [];
+  private pickMeshes: THREE.Mesh[] = [];
   private readonly disposables: { dispose(): void }[] = [];
+  /** Each entity's colour and opacity in the first build. */
+  private readonly looks = new Map<number, Look>();
+  /** Where each entity's current body lies in the buffers. */
+  private readonly spans = new Map<number, Span[]>();
+  private chunks: Chunk[] = [];
+  private disposed = false;
 
   private constructor(entityCount: number) {
     this.state = new EntityState(entityCount);
@@ -88,7 +171,6 @@ export class ModelMesh {
     glb: Uint8Array,
     entityCount: number,
     uniforms: SharedUniforms,
-    materials: BodyMaterials[] = [],
     onProgress?: (fraction: number) => void,
   ): Promise<ModelMesh> {
     const model = new ModelMesh(entityCount);
@@ -101,7 +183,7 @@ export class ModelMesh {
     const gltf = await new GLTFLoader().parseAsync(buffer, '');
     gltf.scene.updateMatrixWorld(true);
     try {
-      await model.build(gltf.scene, uniforms, new Map(materials.map((m) => [m.entity, m.runs])), onProgress);
+      await model.build(gltf.scene, uniforms, onProgress);
     } catch (err) {
       model.dispose();
       throw err;
@@ -111,12 +193,7 @@ export class ModelMesh {
     return model;
   }
 
-  private async build(
-    scene: THREE.Object3D,
-    uniforms: SharedUniforms,
-    runs: Map<number, MaterialRun[]>,
-    onProgress?: (fraction: number) => void,
-  ): Promise<void> {
+  private async build(scene: THREE.Object3D, uniforms: SharedUniforms, onProgress?: (fraction: number) => void): Promise<void> {
     const meshes: THREE.Mesh[] = [];
     scene.traverse((obj) => {
       if ((obj as THREE.Mesh).isMesh) meshes.push(obj as THREE.Mesh);
@@ -127,9 +204,10 @@ export class ModelMesh {
     const batches = new Map<string, Batch[]>();
     const edgeCache = new Map<string, Float32Array>();
     const edgeChunks: { positions: Float32Array; matrix: THREE.Matrix4; entity: number }[] = [];
-    const parts: THREE.BufferGeometry[] = [];
+    const fronts: THREE.BufferGeometry[] = [];
     const add = (color: THREE.Color, opacity: number, item: SourceMesh) => {
-      const key = `${color.getHexString()}-${opacity.toFixed(3)}`;
+      if (!this.looks.has(item.entity)) this.looks.set(item.entity, { color, opacity });
+      const key = lookKey({ color, opacity });
       const list = batches.get(key) ?? [];
       batches.set(key, list);
       const triangles = triangleCount(item.geometry);
@@ -154,18 +232,9 @@ export class ModelMesh {
       const matrix = mesh.matrixWorld.clone();
       // A face set comes two-sided: drawn double-sided, one winding does.
       const front = frontHalf(mesh.geometry);
-      if (front) parts.push(front);
+      if (front) fronts.push(front);
       const geometry = front ?? mesh.geometry;
-      const split = runs.has(entity) ? splitByRuns(geometry, runs.get(entity)!) : null;
-      if (split) {
-        for (const part of split) {
-          parts.push(part.geometry);
-          const own = part.color ? new THREE.Color().setRGB(...part.color, THREE.SRGBColorSpace) : color;
-          add(own, part.opacity < 1 ? part.opacity : opacity, { geometry: part.geometry, matrix, entity });
-        }
-      } else {
-        add(color, opacity, { geometry, matrix, entity });
-      }
+      add(color, opacity, { geometry, matrix, entity });
 
       let edges = edgeCache.get(mesh.geometry.uuid);
       if (!edges) {
@@ -189,7 +258,7 @@ export class ModelMesh {
     }
     await slicer.at(0.98);
     this.buildEdges(edgeChunks, uniforms);
-    for (const part of parts) part.dispose();
+    for (const front of fronts) front.dispose();
     onProgress?.(1);
   }
 
@@ -212,6 +281,7 @@ export class ModelMesh {
     const v = new THREE.Vector3();
     let vOffset = 0;
     let iOffset = 0;
+    const ranges: { entity: number; start: number; count: number }[] = [];
 
     for (const [k, item] of batch.items.entries()) {
       await progress(k);
@@ -240,6 +310,7 @@ export class ModelMesh {
         indices[iOffset + i + 1] = vOffset + (flip ? c : b);
         indices[iOffset + i + 2] = vOffset + (flip ? b : c);
       }
+      ranges.push({ entity: item.entity, start: vOffset, count: pos.count });
       vOffset += pos.count;
       iOffset += n;
     }
@@ -254,6 +325,8 @@ export class ModelMesh {
     geometry.boundsTree = new MeshBVH(geometry);
     this.disposables.push(geometry);
     if (geometry.boundingBox) this.box.union(geometry.boundingBox);
+    const position = geometry.getAttribute('position') as THREE.BufferAttribute;
+    for (const r of ranges) this.addSpan(r.entity, { attribute: position, start: r.start, count: r.count, owner: null, item: null });
 
     // Opaque pass draws everything whose effective opacity is 1 (and the
     // section cut fill); the transparent pass draws the rest. Both share the
@@ -281,7 +354,9 @@ export class ModelMesh {
     const entities = new Float32Array(count);
     const v = new THREE.Vector3();
     let o = 0;
+    const ranges: { entity: number; start: number; count: number }[] = [];
     for (const c of chunks) {
+      ranges.push({ entity: c.entity, start: o, count: c.positions.length / 3 });
       for (let i = 0; i < c.positions.length; i += 3) {
         v.set(c.positions[i]!, c.positions[i + 1]!, c.positions[i + 2]!).applyMatrix4(c.matrix);
         positions[o * 3] = v.x;
@@ -302,6 +377,251 @@ export class ModelMesh {
     lines.raycast = () => {};
     this.disposables.push(geometry, material);
     this.root.add(lines);
+    const position = geometry.getAttribute('position') as THREE.BufferAttribute;
+    for (const r of ranges) this.addSpan(r.entity, { attribute: position, start: r.start, count: r.count, owner: null, item: null });
+  }
+
+  private addSpan(entity: number, span: Span): void {
+    const list = this.spans.get(entity);
+    if (list) list.push(span);
+    else this.spans.set(entity, [span]);
+  }
+
+  // --- patches ------------------------------------------------------------
+
+  /**
+   * Draw `patch`'s bodies in place of their entities' current ones,
+   * yielding to the browser every few milliseconds and waiting at `gate`.
+   */
+  async applyPatch(patch: RefinePatch, uniforms: SharedUniforms, gate?: () => Promise<void>): Promise<void> {
+    const slicer = new Slicer(undefined, gate);
+    const runs = new Map(patch.runs.map((r) => [r.entity, r.runs]));
+    const parts: Part[] = [];
+    const edges: PartEdges[] = [];
+    for (let i = 0; i < patch.entities.length; i++) {
+      await slicer.at();
+      if (this.disposed) return;
+      const entity = patch.entities[i]!;
+      const positions = patch.positions.subarray(patch.vertexStarts[i]! * 3, patch.vertexStarts[i + 1]! * 3);
+      const indices = patch.triangles.subarray(patch.triangleStarts[i]! * 3, patch.triangleStarts[i + 1]! * 3);
+      if (indices.length === 0) continue;
+      this.retire(entity);
+      const look = this.looks.get(entity) ?? DEFAULT_LOOK;
+      const split = runs.has(entity) ? splitRuns(positions, indices, runs.get(entity)!) : null;
+      if (split) {
+        for (const part of split) {
+          const color = part.color ? new THREE.Color().setRGB(...part.color, THREE.SRGBColorSpace) : look.color;
+          const opacity = part.opacity < 1 ? part.opacity : look.opacity;
+          parts.push({ entity, look: { color, opacity }, positions: part.positions, indices: part.indices });
+        }
+      } else {
+        parts.push({ entity, look, positions, indices });
+      }
+      edges.push({ entity, positions: patch.edges.subarray(patch.edgeStarts[i]! * 6, patch.edgeStarts[i + 1]! * 6) });
+      const box = new THREE.Box3().setFromArray(positions);
+      this.entityBoxes.set(entity, box);
+      this.box.union(box);
+    }
+    if (parts.length > 0) this.show(await this.buildChunk(parts, edges, 0, uniforms, slicer), []);
+    for (let level = 0; ; level++) {
+      const same = this.chunks.filter((c) => c.level === level);
+      if (same.length < MERGE_FAN_IN) break;
+      await this.merge(same, level + 1, uniforms, slicer);
+    }
+  }
+
+  /**
+   * Merge the chunks of single patches left: no more will come. (Merging
+   * everything would hold a copy of every body at once.)
+   */
+  async compactPatches(uniforms: SharedUniforms, gate?: () => Promise<void>): Promise<void> {
+    const small = this.chunks.filter((c) => c.level === 0);
+    if (small.length < 2) return;
+    await this.merge(small, 1, uniforms, new Slicer(undefined, gate));
+  }
+
+  /** Patch chunks drawn now. */
+  get patchChunks(): number {
+    return this.chunks.length;
+  }
+
+  /** Hide `entity`'s current body: its vertices collapse onto its first. */
+  private retire(entity: number): void {
+    for (const span of this.spans.get(entity) ?? []) {
+      const a = span.attribute.array as Float32Array;
+      const s = span.start * 3;
+      const end = (span.start + span.count) * 3;
+      for (let k = s + 3; k < end; k += 3) {
+        a[k] = a[s]!;
+        a[k + 1] = a[s + 1]!;
+        a[k + 2] = a[s + 2]!;
+      }
+      span.attribute.addUpdateRange(s, end - s);
+      span.attribute.needsUpdate = true;
+      if (span.item) span.item.live = false;
+    }
+    this.spans.delete(entity);
+  }
+
+  /** Put `chunk` in the scene in place of `old`, at once. */
+  private show(chunk: Chunk, old: Chunk[]): void {
+    if (this.disposed) {
+      for (const d of chunk.disposables) d.dispose();
+      return;
+    }
+    for (const group of chunk.groups) {
+      for (const mesh of group.meshes) this.root.add(mesh);
+      this.pickMeshes.push(group.meshes[0]!);
+    }
+    if (chunk.edges) this.root.add(chunk.edges.lines);
+    for (const c of old) {
+      for (const group of c.groups) for (const mesh of group.meshes) this.root.remove(mesh);
+      if (c.edges) this.root.remove(c.edges.lines);
+      const picks = new Set(c.groups.map((g) => g.meshes[0]));
+      this.pickMeshes = this.pickMeshes.filter((m) => !picks.has(m));
+      for (const group of c.groups) for (const item of group.items) if (item.live) this.dropSpans(item.entity, c);
+      for (const item of c.edges?.items ?? []) if (item.live) this.dropSpans(item.entity, c);
+      for (const d of c.disposables) d.dispose();
+      for (const group of c.groups) group.geometry.boundsTree = undefined;
+    }
+    this.chunks = this.chunks.filter((c) => !old.includes(c));
+    this.chunks.push(chunk);
+  }
+
+  private dropSpans(entity: number, owner: Chunk): void {
+    const list = this.spans.get(entity);
+    if (!list) return;
+    const kept = list.filter((s) => s.owner !== owner);
+    if (kept.length > 0) this.spans.set(entity, kept);
+    else this.spans.delete(entity);
+  }
+
+  /** Draw the live bodies of `chunks` as one chunk of `level`. */
+  private async merge(chunks: Chunk[], level: number, uniforms: SharedUniforms, slicer: Slicer): Promise<void> {
+    const parts: Part[] = [];
+    const edges: PartEdges[] = [];
+    for (const chunk of chunks) {
+      for (const group of chunk.groups) {
+        const positions = group.geometry.getAttribute('position').array as Float32Array;
+        const index = group.geometry.index!.array as Uint32Array;
+        for (const item of group.items) {
+          if (!item.live) continue;
+          await slicer.at();
+          const local = index.slice(item.indexStart, item.indexStart + item.indexCount);
+          for (let k = 0; k < local.length; k++) local[k] = local[k]! - item.start;
+          parts.push({
+            entity: item.entity,
+            look: item.look,
+            positions: positions.subarray(item.start * 3, (item.start + item.count) * 3),
+            indices: local,
+          });
+        }
+      }
+      if (chunk.edges) {
+        const positions = chunk.edges.geometry.getAttribute('position').array as Float32Array;
+        for (const item of chunk.edges.items) {
+          if (item.live) edges.push({ entity: item.entity, positions: positions.subarray(item.start * 3, (item.start + item.count) * 3) });
+        }
+      }
+    }
+    const merged = await this.buildChunk(parts, edges, level, uniforms, slicer);
+    this.show(merged, chunks);
+  }
+
+  /** Meshes for `parts`, one per look (split at MAX_BATCH_TRIANGLES), and one edge set. */
+  private async buildChunk(parts: Part[], edges: PartEdges[], level: number, uniforms: SharedUniforms, slicer: Slicer): Promise<Chunk> {
+    const chunk: Chunk = { level, groups: [], edges: null, disposables: [] };
+    const byLook = new Map<string, Part[][]>();
+    const sizes = new Map<Part[], number>();
+    for (const part of parts) {
+      const key = lookKey(part.look);
+      const lists = byLook.get(key) ?? [];
+      byLook.set(key, lists);
+      let list = lists.at(-1);
+      const triangles = part.indices.length / 3;
+      if (!list || (list.length > 0 && sizes.get(list)! + triangles > MAX_BATCH_TRIANGLES)) {
+        list = [];
+        lists.push(list);
+        sizes.set(list, 0);
+      }
+      list.push(part);
+      sizes.set(list, sizes.get(list)! + triangles);
+    }
+    for (const list of [...byLook.values()].flat()) {
+      let vertexCount = 0;
+      let indexCount = 0;
+      for (const part of list) {
+        vertexCount += part.positions.length / 3;
+        indexCount += part.indices.length;
+      }
+      const positions = new Float32Array(vertexCount * 3);
+      const entities = new Float32Array(vertexCount);
+      const index = new Uint32Array(indexCount);
+      const items: ChunkItem[] = [];
+      let v = 0;
+      let o = 0;
+      for (const part of list) {
+        await slicer.at();
+        const count = part.positions.length / 3;
+        positions.set(part.positions, v * 3);
+        entities.fill(part.entity, v, v + count);
+        for (let k = 0; k < part.indices.length; k++) index[o + k] = part.indices[k]! + v;
+        items.push({ entity: part.entity, look: part.look, start: v, count, indexStart: o, indexCount: part.indices.length, live: true });
+        v += count;
+        o += part.indices.length;
+      }
+      const geometry = new THREE.BufferGeometry();
+      const position = new THREE.BufferAttribute(positions, 3);
+      geometry.setAttribute('position', position);
+      geometry.setAttribute('aEntity', new THREE.BufferAttribute(entities, 1));
+      geometry.setIndex(new THREE.BufferAttribute(index, 1));
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+      await slicer.at();
+      // Indirect: the index keeps its order, so that a merge can read each part back.
+      geometry.boundsTree = new MeshBVH(geometry, { indirect: true });
+      const look = list[0]!.look;
+      const meshes = ([0, 1] as const).map((pass) => {
+        const mesh = new THREE.Mesh(geometry, createFaceMaterial(uniforms, look.color, look.opacity, pass));
+        mesh.matrixAutoUpdate = false;
+        if (pass === 1) mesh.renderOrder = 1;
+        chunk.disposables.push(mesh.material as THREE.Material);
+        return mesh;
+      });
+      meshes[0]!.raycast = acceleratedRaycast;
+      chunk.disposables.push(geometry);
+      chunk.groups.push({ geometry, items, meshes });
+      for (const item of items) this.addSpan(item.entity, { attribute: position, start: item.start, count: item.count, owner: chunk, item });
+    }
+    let segmentPoints = 0;
+    for (const e of edges) segmentPoints += e.positions.length / 3;
+    if (segmentPoints > 0) {
+      const positions = new Float32Array(segmentPoints * 3);
+      const entities = new Float32Array(segmentPoints);
+      const items: ChunkEdgeItem[] = [];
+      let v = 0;
+      for (const e of edges) {
+        const count = e.positions.length / 3;
+        positions.set(e.positions, v * 3);
+        entities.fill(e.entity, v, v + count);
+        items.push({ entity: e.entity, start: v, count, live: true });
+        v += count;
+      }
+      const geometry = new THREE.BufferGeometry();
+      const position = new THREE.BufferAttribute(positions, 3);
+      geometry.setAttribute('position', position);
+      geometry.setAttribute('aEntity', new THREE.BufferAttribute(entities, 1));
+      geometry.computeBoundingSphere();
+      const material = createEdgeMaterial(uniforms);
+      const lines = new THREE.LineSegments(geometry, material);
+      lines.matrixAutoUpdate = false;
+      lines.renderOrder = 2;
+      lines.raycast = () => {};
+      chunk.disposables.push(geometry, material);
+      chunk.edges = { geometry, lines, items };
+      for (const item of items) this.addSpan(item.entity, { attribute: position, start: item.start, count: item.count, owner: chunk, item });
+    }
+    return chunk;
   }
 
   private boxFor(entity: number): THREE.Box3 {
@@ -344,7 +664,11 @@ export class ModelMesh {
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const d of this.disposables) d.dispose();
+    for (const c of this.chunks) for (const d of c.disposables) d.dispose();
+    this.chunks = [];
+    this.spans.clear();
     for (const m of this.pickMeshes) m.geometry.boundsTree = undefined;
     this.state.dispose();
     this.root.clear();
@@ -398,51 +722,44 @@ export function frontHalf(geometry: THREE.BufferGeometry): THREE.BufferGeometry 
 }
 
 /**
- * `geometry`'s triangles in `runs`, each its own compact geometry. rvt-rs
- * writes a face set two-sided, every triangle then the same reversed, so a
- * run covers its range in both halves; a transparent run takes the first
- * only, as the faces are drawn double-sided and would blend twice. Null
- * where the counts disagree.
+ * A body's triangles in `runs` of one material, in order, each with its
+ * own vertices. Null where the counts disagree.
  */
-export function splitByRuns(
-  geometry: THREE.BufferGeometry,
+export function splitRuns(
+  positions: Float32Array,
+  indices: Uint32Array,
   runs: MaterialRun[],
-): { geometry: THREE.BufferGeometry; color: [number, number, number] | null; opacity: number }[] | null {
-  const index = geometry.index;
-  if (!index) return null;
+): { positions: Float32Array; indices: Uint32Array; color: [number, number, number] | null; opacity: number }[] | null {
   const total = runs.reduce((n, r) => n + r.triangles, 0);
-  const triangles = index.count / 3;
-  const halves = triangles === total ? 1 : triangles === 2 * total ? 2 : 0;
-  if (!halves || total === 0) return null;
-  const position = geometry.getAttribute('position');
+  if (total === 0 || total * 3 !== indices.length) return null;
+  const remap = new Int32Array(positions.length / 3);
   const result = [];
   let start = 0;
   for (const run of runs) {
-    const remap = new Map<number, number>();
-    const positions: number[] = [];
-    const indices: number[] = [];
-    for (let half = 0; half < (run.opacity < 1 ? 1 : halves); half++) {
-      const first = half * total + start;
-      for (let t = first; t < first + run.triangles; t++) {
-        for (let k = 0; k < 3; k++) {
-          const v = index.getX(t * 3 + k);
-          let m = remap.get(v);
-          if (m === undefined) {
-            m = remap.size;
-            remap.set(v, m);
-            positions.push(position.getX(v), position.getY(v), position.getZ(v));
-          }
-          indices.push(m);
-        }
+    remap.fill(-1);
+    const out = new Float32Array(Math.min(positions.length, run.triangles * 9));
+    const own = new Uint32Array(run.triangles * 3);
+    let n = 0;
+    for (let k = 0; k < own.length; k++) {
+      const v = indices[start * 3 + k]!;
+      let m = remap[v]!;
+      if (m < 0) {
+        m = n++;
+        remap[v] = m;
+        out[m * 3] = positions[v * 3]!;
+        out[m * 3 + 1] = positions[v * 3 + 1]!;
+        out[m * 3 + 2] = positions[v * 3 + 2]!;
       }
+      own[k] = m;
     }
-    const part = new THREE.BufferGeometry();
-    part.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    part.setIndex(indices);
-    result.push({ geometry: part, color: run.color, opacity: run.opacity });
+    result.push({ positions: out.slice(0, n * 3), indices: own, color: run.color, opacity: run.opacity });
     start += run.triangles;
   }
   return result;
+}
+
+function lookKey(look: Look): string {
+  return `${look.color.getHexString()}-${look.opacity.toFixed(3)}`;
 }
 
 function entityIndexOf(obj: THREE.Object3D): number | null {

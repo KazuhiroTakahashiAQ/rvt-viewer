@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { frontHalf, splitByRuns } from '../../src/engine/ModelMesh';
+import { frontHalf, splitRuns } from '../../src/engine/ModelMesh';
 
 /** A two-sided face set as rvt-rs writes it: the triangles, then each reversed. */
 function twoSided(vertices: number[], triangles: number[][]): THREE.BufferGeometry {
@@ -10,37 +10,28 @@ function twoSided(vertices: number[], triangles: number[][]): THREE.BufferGeomet
   return geometry;
 }
 
-describe('splitByRuns', () => {
+describe('splitRuns', () => {
   // Two quads: a frame (triangles 0–1) and a pane of glass (triangles 2–3).
-  const geometry = twoSided(
-    [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 2, 0, 0, 3, 0, 0, 3, 1, 0, 2, 1, 0],
-    [
-      [0, 1, 2],
-      [0, 2, 3],
-      [4, 5, 6],
-      [4, 6, 7],
-    ],
-  );
+  const positions = new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 2, 0, 0, 3, 0, 0, 3, 1, 0, 2, 1, 0]);
+  const indices = new Uint32Array([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
 
-  it('cuts a two-sided face set into compact runs, transparent ones single-sided', () => {
-    const parts = splitByRuns(geometry, [
+  it('cuts a body into runs, each with its own vertices', () => {
+    const parts = splitRuns(positions, indices, [
       { triangles: 2, color: [0.5, 0.5, 0.5], opacity: 1 },
       { triangles: 2, color: null, opacity: 0.2 },
     ])!;
     expect(parts).toHaveLength(2);
-    // The frame keeps both windings; the glass, drawn double-sided, one.
-    expect(parts.map((p) => p.geometry.index!.count)).toEqual([12, 6]);
-    expect(parts.map((p) => p.geometry.getAttribute('position').count)).toEqual([4, 4]);
-    expect(Array.from(parts[0]!.geometry.index!.array).slice(6)).toEqual([0, 2, 1, 0, 3, 2]);
-    const glass = parts[1]!.geometry;
-    const xs = Array.from({ length: 4 }, (_, i) => glass.getAttribute('position').getX(i));
+    expect(parts.map((p) => p.indices.length)).toEqual([6, 6]);
+    expect(parts.map((p) => p.positions.length / 3)).toEqual([4, 4]);
+    expect(Array.from(parts[1]!.indices)).toEqual([0, 1, 2, 0, 2, 3]);
+    const xs = Array.from({ length: 4 }, (_, i) => parts[1]!.positions[i * 3]!);
     expect(Math.min(...xs)).toBe(2);
-    expect(Array.from(glass.index!.array)).toEqual([0, 1, 2, 0, 2, 3]);
     expect(parts[1]!.opacity).toBe(0.2);
+    expect(parts[0]!.color).toEqual([0.5, 0.5, 0.5]);
   });
 
   it('leaves a body alone whose triangle count does not match its runs', () => {
-    expect(splitByRuns(geometry, [{ triangles: 3, color: null, opacity: 1 }])).toBeNull();
+    expect(splitRuns(positions, indices, [{ triangles: 3, color: null, opacity: 1 }])).toBeNull();
   });
 });
 

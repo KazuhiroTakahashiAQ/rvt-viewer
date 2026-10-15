@@ -12,7 +12,7 @@
 
 import * as THREE from 'three';
 import type { CategoryKey } from '../model/categories';
-import type { BodyMaterials } from '../wasm/types';
+import type { RefinePatch } from '../worker/protocol';
 import { pickPriority } from '../model/categories';
 import { CameraRig, type CameraPose, type Projection, anglesFromDirection, boxCorners, clonePose } from './CameraRig';
 import { FLAG_HALFTONE, FLAG_HOVER, FLAG_REVEALED, FLAG_SELECTED, FLAG_VISIBLE } from './EntityState';
@@ -47,7 +47,16 @@ export interface ViewerCallbacks {
   onViewCubeMenu: (clientX: number, clientY: number) => void;
   onSectionBoxChange: (viewId: string, box: SectionBoxState) => void;
   onNavModeChange: (mode: NavMode) => void;
+  /** The camera or what is shown changed and has stayed so for a moment. */
+  onViewSettled?: () => void;
 }
+
+/** How long the view must stay put before `onViewSettled`, ms. */
+const VIEW_SETTLE_MS = 250;
+/** A wheel turn counts as moving the view for this long, ms. */
+const WHEEL_ACTIVE_MS = 200;
+/** Saved-mesh candidates smaller on screen than this, pixels, wait with those off screen. */
+const MIN_PRIORITY_PIXELS = 3;
 
 const CLICK_SLOP = 4;
 const DOUBLE_MIDDLE_MS = 350;
@@ -103,6 +112,13 @@ export class Viewer {
   private hoverQueued: { x: number; y: number } | null = null;
   private dirty = true;
   private frame = 0;
+  private lastWheel = 0;
+  private lastCamera = new THREE.Matrix4();
+  private lastProjection = new THREE.Matrix4();
+  /** When the view last changed, while `onViewSettled` is due. */
+  private viewChangedAt: number | null = null;
+  /** Patches are drawn one after another. */
+  private patches: Promise<void> = Promise.resolve();
   private width = 1;
   private height = 1;
   private disposed = false;
@@ -170,7 +186,7 @@ export class Viewer {
     meta: EntityMeta,
     onProgress?: (fraction: number) => void,
   ): Promise<void> {
-    const mesh = await ModelMesh.fromGlb(glb, entityCount, this.uniforms, [], onProgress);
+    const mesh = await ModelMesh.fromGlb(glb, entityCount, this.uniforms, onProgress);
     if (this.disposed) {
       mesh.dispose();
       return;
@@ -201,33 +217,115 @@ export class Viewer {
   }
 
   /**
-   * Swap in new bodies for the same entities (the saved-mesh pass): the
+   * Draw `patch`'s bodies in place of their entities' boxes (the saved-mesh
+   * pass), after the patches before it and while the view is still: the
    * view, camera, selection and display settings stay as they are.
    */
-  async replaceGeometry(
-    glb: Uint8Array,
-    materials: BodyMaterials[] = [],
-    onProgress?: (fraction: number) => void,
-  ): Promise<void> {
-    const old = this.model;
-    if (!old) return;
-    const mesh = await ModelMesh.fromGlb(glb, old.state.count, this.uniforms, materials, onProgress);
-    if (this.disposed || this.model !== old) {
-      mesh.dispose();
-      return;
+  applyPatch(patch: RefinePatch): Promise<void> {
+    // The patch belongs to the model shown now, not to one opened before it is drawn.
+    const model = this.model;
+    const run = async () => {
+      if (!model || this.model !== model || this.disposed) return;
+      await this.whenIdle();
+      await model.applyPatch(patch, this.uniforms, () => this.whenIdle());
+      if (this.model !== model) return;
+      this.afterGeometryChange();
+    };
+    this.patches = this.patches.then(run, run);
+    return this.patches;
+  }
+
+  /** The last patch has come: merge what is left of them. */
+  finishPatches(): Promise<void> {
+    const model = this.model;
+    const run = async () => {
+      if (!model || this.model !== model || this.disposed) return;
+      await model.compactPatches(this.uniforms, () => this.whenIdle());
+      if (this.model === model) this.afterGeometryChange();
+    };
+    this.patches = this.patches.then(run, run);
+    return this.patches;
+  }
+
+  private afterGeometryChange(): void {
+    // The entities stay the same, and so do their hover and selection.
+    // New materials need the cut planes; plan ranges go by element boxes.
+    this.applyClipPlanesToMaterials();
+    if (this.view?.kind === 'plan') {
+      this.computePlanMask();
+      if (this.display) this.applyDisplay(this.display);
     }
-    this.scene.remove(old.root);
-    old.dispose();
-    this.model = mesh;
-    this.scene.add(mesh.root);
-    this.uniforms.uRvtState.value = mesh.state.state;
-    this.uniforms.uRvtOverride.value = mesh.state.override;
-    this.hover = null;
-    this.computePlanMask();
-    this.updateClipping();
-    if (this.display) this.applyDisplay(this.display);
-    else this.setSelection([...this.selection]);
     this.requestRender();
+  }
+
+  /** Whether the user is moving the view: dragging, touching, turning the wheel. */
+  get interacting(): boolean {
+    return (
+      this.drag !== null || this.touches.size > 0 || performance.now() - this.lastWheel < WHEEL_ACTIVE_MS || this.rig.animating
+    );
+  }
+
+  /** Resolves once the user is not moving the view. */
+  whenIdle(): Promise<void> {
+    if (!this.interacting || this.disposed) return Promise.resolve();
+    return new Promise((resolve) => {
+      const check = () => {
+        if (this.interacting && !this.disposed) requestAnimationFrame(check);
+        else resolve();
+      };
+      requestAnimationFrame(check);
+    });
+  }
+
+  /**
+   * `candidates` in the order to draw their saved meshes: first those on
+   * screen (shown, in the view and its clip box, a few pixels or more),
+   * larger on screen first; then the others, by `groupOf` (instances of one
+   * family type draw the same symbols, which a batch reads once), larger
+   * first. `visible` counts the first.
+   */
+  refineOrder(candidates: Iterable<number>, groupOf: (entity: number) => string): { order: Uint32Array; visible: number } {
+    const model = this.model;
+    const list = [...candidates];
+    if (!model) return { order: Uint32Array.from(list), visible: 0 };
+    const cam = this.rig.camera;
+    cam.updateMatrixWorld();
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(
+      new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse),
+    );
+    const perspective = this.rig.pose.projection === 'perspective';
+    const eye = cam.getWorldPosition(new THREE.Vector3());
+    const halfHeight = Math.max(this.rig.halfHeight, 1e-6);
+    const tanHalfFov = perspective ? Math.tan(THREE.MathUtils.degToRad((cam as THREE.PerspectiveCamera).fov / 2)) : 1;
+    const pixelsPerUnit = this.height / 2;
+    const center = new THREE.Vector3();
+    const shown: { entity: number; size: number }[] = [];
+    const rest: { entity: number; size: number; group: string }[] = [];
+    for (const entity of list) {
+      const box = model.entityBoxes.get(entity);
+      if (!box || box.isEmpty()) {
+        rest.push({ entity, size: 0, group: groupOf(entity) });
+        continue;
+      }
+      box.getCenter(center);
+      const radius = box.min.distanceTo(box.max) / 2;
+      // Share of the screen's half height the box's bounding sphere spans.
+      const size = perspective ? radius / (Math.max(center.distanceTo(eye), radius, 1e-6) * tanHalfFov) : radius / halfHeight;
+      const onScreen =
+        model.state.isVisible(entity) &&
+        frustum.intersectsBox(box) &&
+        (!this.clipBox || this.clipBox.intersectsBox(box)) &&
+        size * pixelsPerUnit >= MIN_PRIORITY_PIXELS;
+      if (onScreen) shown.push({ entity, size });
+      else rest.push({ entity, size, group: groupOf(entity) });
+    }
+    shown.sort((a, b) => b.size - a.size);
+    rest.sort((a, b) => (a.group < b.group ? -1 : a.group > b.group ? 1 : b.size - a.size));
+    const order = new Uint32Array(list.length);
+    let k = 0;
+    for (const c of shown) order[k++] = c.entity;
+    for (const c of rest) order[k++] = c.entity;
+    return { order, visible: shown.length };
   }
 
   get modelBox(): THREE.Box3 | null {
@@ -404,6 +502,7 @@ export class Viewer {
       state.setColor(entity, ov?.color ? new THREE.Color(ov.color) : null);
     }
     state.commit();
+    this.viewChanged();
     this.requestRender();
   }
 
@@ -569,6 +668,10 @@ export class Viewer {
     this.frame = requestAnimationFrame(this.loop);
     const now = performance.now();
     if (this.rig.tick(now)) this.dirty = true;
+    if (this.viewChangedAt !== null && now - this.viewChangedAt > VIEW_SETTLE_MS && !this.interacting) {
+      this.viewChangedAt = null;
+      this.callbacks.onViewSettled?.();
+    }
     if (this.hoverQueued) {
       const { x, y } = this.hoverQueued;
       this.hoverQueued = null;
@@ -587,7 +690,17 @@ export class Viewer {
     this.uniforms.uRvtCutBias.value = this.cutBias();
     this.renderer.render(this.scene, cam);
     this.viewCube.sync(q);
+    if (!cam.matrixWorld.equals(this.lastCamera) || !cam.projectionMatrix.equals(this.lastProjection)) {
+      this.lastCamera.copy(cam.matrixWorld);
+      this.lastProjection.copy(cam.projectionMatrix);
+      this.viewChanged();
+    }
   };
+
+  /** What is on screen changed: tell `onViewSettled` once it stays. */
+  private viewChanged(): void {
+    this.viewChangedAt = performance.now();
+  }
 
   /** CUT_BIAS_METRES expressed as a window-space depth offset for the active camera. */
   private cutBias(): number {
@@ -965,6 +1078,7 @@ export class Viewer {
 
   private onWheel = (ev: WheelEvent): void => {
     ev.preventDefault();
+    this.lastWheel = performance.now();
     this.rig.cancelAnimation();
     let delta = ev.deltaY;
     if (ev.deltaMode === 1) delta *= 33;

@@ -9,13 +9,27 @@ import { forgetFile, fileFromHandle, rememberFile, type RecentFile } from '../pw
 import { type LoadErrorCode, useStore } from '../state/store';
 import type { FileMetadata, Summary } from '../wasm/types';
 import { RvtWorkerClient } from '../worker/client';
-import type { ExportKind, RefinedPayload, SavedMeshReport } from '../worker/protocol';
+import type { ExportKind, RefinePatch } from '../worker/protocol';
 import { baseName, downloadData, toJson } from './download';
+import { getViewer } from './viewerBridge';
 
 export const ACCEPTED_EXTENSIONS = ['.rvt', '.rfa', '.rte', '.rft'];
 
 const client = new RvtWorkerClient();
 let openSeq = 0;
+
+/** The saved-mesh pass of the open document, while it draws. */
+interface Refining {
+  seq: number;
+  total: number;
+  done: number;
+  /** Candidates not taken yet. */
+  pending: Set<number>;
+  /** What the last order put first, not to send the same again. */
+  lastOrder: string;
+}
+
+let refining: Refining | null = null;
 
 export function isRevitFileName(name: string): boolean {
   const lower = name.toLowerCase();
@@ -25,6 +39,7 @@ export function isRevitFileName(name: string): boolean {
 export async function openFile(file: File, handle?: FileSystemFileHandle): Promise<void> {
   const store = useStore.getState();
   const seq = ++openSeq;
+  refining = null;
   store.startLoading(file.name, file.size);
   if (handle) void rememberFile(handle, file);
 
@@ -35,11 +50,17 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
     const savedMeshes = store.prefs.savedMeshes;
     const ready = await client.open(bytes, {
       savedMeshes,
-      onRefined: (refined, report, error) => {
-        if (seq === openSeq) savedMeshesDone(refined, report, error);
-      },
       onRefineProgress: (stage, done, total) => {
         if (seq === openSeq) useStore.getState().setWork({ stage, done, total });
+      },
+      onRefineCandidates: (candidates) => {
+        if (seq === openSeq) refineCandidates(seq, candidates);
+      },
+      onRefinePatch: (patch) => {
+        if (seq === openSeq) refinePatch(seq, patch);
+      },
+      onRefineFailed: (error) => {
+        if (seq === openSeq) refineFailed(error);
       },
       onProgress: (step) => {
         if (seq === openSeq) useStore.getState().setLoadStep(step);
@@ -66,7 +87,6 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
       glb: ready.glb,
       hasGeometry,
       savedMeshes: { status: savedMeshes ? 'pending' : 'off', report: null },
-      refinedBody: null,
     });
     // Without geometry no view draws a first model to wait for.
     if (!hasGeometry) requestSavedMeshes();
@@ -89,28 +109,84 @@ export function documentSeq(): number {
  */
 export function requestSavedMeshes(): void {
   const store = useStore.getState();
-  if (store.doc?.savedMeshes.status !== 'pending' || store.work) return;
+  if (store.doc?.savedMeshes.status !== 'pending' || store.work || refining) return;
   store.setWork({ stage: 'materials', done: 0, total: 1 });
-  client.startRefine();
+  client.refineBegin();
 }
 
-function savedMeshesDone(refined: RefinedPayload | null, report: SavedMeshReport | null, error?: string): void {
+/**
+ * What is on screen changed: the saved-mesh pass takes the candidates in
+ * view first from now on.
+ */
+export function savedMeshViewChanged(): void {
+  if (refining && refining.seq === openSeq) sendRefineOrder(refining);
+}
+
+function sendRefineOrder(r: Refining): void {
+  if (r.pending.size === 0) return;
+  const viewer = getViewer();
+  const index = useStore.getState().doc?.index;
+  // Without a view to rank them, as they come.
+  const { order, visible } =
+    viewer && index
+      ? viewer.refineOrder(r.pending, (e) => {
+          const record = index.byIndex.get(e);
+          return record ? `${record.familyName}\u0000${record.typeName}` : '';
+        })
+      : { order: Uint32Array.from(r.pending), visible: 0 };
+  // The worker starts small batches again on a new order: only when it differs.
+  const head = `${visible}:${order.subarray(0, Math.min(visible, 64)).join(',')}`;
+  if (head === r.lastOrder) return;
+  r.lastOrder = head;
+  client.refineOrder(order, visible);
+}
+
+function refineCandidates(seq: number, candidates: Uint32Array): void {
   const store = useStore.getState();
-  if (!store.doc) return;
-  // With a new body the page's build takes over the bar.
-  if (!refined) store.setWork(null);
-  if (error !== undefined) {
-    store.savedMeshesDone('failed', null);
-    store.pushToast('error', i18n.t('savedMeshes.failed', { detail: error }));
+  if (candidates.length === 0) {
+    store.setWork(null);
+    store.savedMeshesDone('done', { candidates: 0, replaced: 0, triangles: 0 });
     return;
   }
-  store.savedMeshesDone(
-    'done',
-    report,
-    refined
-      ? { model: refined.model, index: buildModelIndex(refined.model), glb: refined.glb, materials: refined.materials }
-      : undefined,
-  );
+  refining = { seq, total: candidates.length, done: 0, pending: new Set(candidates), lastOrder: '' };
+  store.setWork({ stage: 'meshes', done: 0, total: candidates.length });
+  sendRefineOrder(refining);
+}
+
+function refinePatch(seq: number, patch: RefinePatch): void {
+  const r = refining;
+  if (!r || r.seq !== seq) return;
+  for (const entity of patch.done) r.pending.delete(entity);
+  r.done += patch.done.length;
+  const viewer = getViewer();
+  const drawn = viewer ? viewer.applyPatch(patch) : Promise.resolve();
+  void drawn
+    .catch((err: unknown) => {
+      if (seq === openSeq) useStore.getState().pushToast('error', i18n.t('error.geometry', { detail: err instanceof Error ? err.message : String(err) }));
+    })
+    .then(() => {
+      if (seq !== openSeq || refining !== r) return;
+      const store = useStore.getState();
+      store.markSavedMeshes(patch.entities);
+      if (!patch.finished) {
+        store.setWork({ stage: 'meshes', done: r.done, total: r.total });
+        client.refineAck();
+        return;
+      }
+      refining = null;
+      store.setWork(null);
+      store.savedMeshesDone('done', patch.report);
+      void viewer?.finishPatches();
+    });
+}
+
+function refineFailed(error: string): void {
+  refining = null;
+  const store = useStore.getState();
+  store.setWork(null);
+  if (!store.doc) return;
+  store.savedMeshesDone('failed', null);
+  store.pushToast('error', i18n.t('savedMeshes.failed', { detail: error }));
 }
 
 function classifyError(detail: string, summary: Summary | null): LoadErrorCode {
@@ -122,6 +198,7 @@ function classifyError(detail: string, summary: Summary | null): LoadErrorCode {
 
 export function closeDocument(): void {
   openSeq++;
+  refining = null;
   client.close();
   useStore.getState().closeDocument();
 }
@@ -218,6 +295,8 @@ export async function exportDocument(kind: ExportKind | 'diagnostics'): Promise<
   if (!doc) return;
   const spec = EXPORTS[kind];
   const name = baseName(doc.fileName) + spec.ext;
+  // The worker draws every body left first (the bar shows it), for a complete model.
+  if (kind !== 'diagnostics' && refining) store.pushToast('info', i18n.t('export.waitForMeshes'));
   try {
     const data = kind === 'diagnostics' ? toJson(doc.diagnostics) : await client.export(kind);
     downloadData(data, name, spec.mime);

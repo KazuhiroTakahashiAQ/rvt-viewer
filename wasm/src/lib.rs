@@ -9,7 +9,8 @@
 //! on every call.
 //!
 //! The functions are those of `rvt-rs/rvt-wasm` the viewer used, plus the
-//! saved display meshes rvt-wasm does not bind ([`saved_meshes`]).
+//! saved display meshes rvt-wasm does not bind ([`saved_meshes`]), drawn a
+//! batch at a time in the order the page asks for.
 //!
 //! No network APIs: CI checks the compiled module's imports.
 
@@ -18,7 +19,6 @@ use rvt::ifc::{
     ExportQualityMode, IfcModel, RvtDocExporter,
     entities::{IfcEntity, SolidShape},
     gltf::model_to_glb,
-    saved_meshes::SavedMeshReport,
     scene_graph::{SceneNode, Schedule, build_scene_graph, build_schedule, distinct_ifc_types},
     sheet::{SheetOptions, render_plan_svg},
     step_writer::write_step,
@@ -68,10 +68,12 @@ fn object(entries: &[(&str, &JsValue)]) -> Result<JsValue, JsValue> {
     Ok(out.into())
 }
 
-/// The open document: the file's bytes (the saved-mesh pass reads them
-/// again) and its model.
+/// The open document: its model, and the file for the saved-mesh pass
+/// (its bytes until the pass starts, then the open file and the pass's
+/// state until it ends).
 struct Document {
-    bytes: Vec<u8>,
+    bytes: Option<Vec<u8>>,
+    refining: Option<(RevitFile, saved_meshes::Refiner)>,
     model: IfcModel,
 }
 
@@ -134,7 +136,13 @@ pub fn open_document(bytes: Vec<u8>, mode: &str) -> Result<JsValue, JsValue> {
         ("model", &page_model(&mut model)?),
         ("diagnostics", &to_js(&result.diagnostics)?),
     ])?;
-    DOCUMENT.with(|cell| *cell.borrow_mut() = Some(Document { bytes, model }));
+    DOCUMENT.with(|cell| {
+        *cell.borrow_mut() = Some(Document {
+            bytes: Some(bytes),
+            refining: None,
+            model,
+        })
+    });
     Ok(out)
 }
 
@@ -197,7 +205,11 @@ pub fn document_schedule_csv(kind: &str, metric: bool, excel: bool) -> Result<St
     install_panic_hook();
     use rvt::ifc::schedule_csv::{CsvOptions, LengthUnit, elements_csv, rooms_csv};
     let options = CsvOptions {
-        unit: if metric { LengthUnit::Metres } else { LengthUnit::Feet },
+        unit: if metric {
+            LengthUnit::Metres
+        } else {
+            LengthUnit::Feet
+        },
         excel_bom: excel,
     };
     with_document(|document| match kind {
@@ -209,56 +221,117 @@ pub fn document_schedule_csv(kind: &str, metric: bool, excel: bool) -> Result<St
     })
 }
 
+/// Start the saved-mesh pass: read the document's materials and return the
+/// candidates, the entities whose box body a saved mesh may replace, as a
+/// `Uint32Array` ([`saved_meshes::Refiner`]). Empty where there are none
+/// or the pass has run.
+#[wasm_bindgen(js_name = documentRefineBegin)]
+pub fn document_refine_begin() -> Result<js_sys::Uint32Array, JsValue> {
+    install_panic_hook();
+    with_document(|document| {
+        let Some(bytes) = document.bytes.take() else {
+            let pending: Vec<u32> = match &document.refining {
+                Some((_, refiner)) => refiner.pending().map(|i| i as u32).collect(),
+                None => Vec::new(),
+            };
+            return Ok(js_sys::Uint32Array::from(pending.as_slice()));
+        };
+        let mut rf = RevitFile::open_bytes(bytes).map_err(err_str)?;
+        let refiner = saved_meshes::Refiner::new(&mut rf, &document.model).map_err(err_str)?;
+        let pending: Vec<u32> = refiner.pending().map(|i| i as u32).collect();
+        if !refiner.is_done() {
+            document.refining = Some((rf, refiner));
+        }
+        Ok(js_sys::Uint32Array::from(pending.as_slice()))
+    })
+}
+
 #[derive(Serialize)]
-struct EntityMaterials {
+struct EntityRuns {
     entity: usize,
     runs: Vec<saved_meshes::MaterialRun>,
 }
 
-/// Replace the document's box bodies with the meshes Revit saved for
-/// display ([`saved_meshes::attach`]), calling `progress(stage, done,
-/// total)` as it goes. Returns `{ model, report: { candidates, replaced,
-/// triangles }, materials }`: `model` the new [`page_model`], null when
-/// nothing was replaced (entity indices are unchanged); `materials` lists
-/// `{ entity, runs: [{ triangles, color, opacity }] }` for the bodies with
-/// a transparent face, their triangles in runs of one material in the order
-/// of their face set.
-#[wasm_bindgen(js_name = documentAttachSavedMeshes)]
-pub fn document_attach_saved_meshes(progress: &js_sys::Function) -> Result<JsValue, JsValue> {
+/// Draw the candidates among `entities` from their saved meshes. Returns
+/// `{ done, entities, vertexStarts, triangleStarts, edgeStarts, positions,
+/// triangles, edges, runs, report, finished }`: `done` the candidates taken
+/// (drawn or not); per body drawn (`entities`, new ones and earlier ones
+/// whose materials changed) its slice of `positions` (`x, y, z` in glTF's
+/// frame), `triangles` (vertex indices from its first vertex) and `edges`
+/// (segment end points), the slices' starts in vertices, triangles and
+/// segments with one more at the end; `runs` the `{ entity, runs }` of the
+/// bodies with a transparent face; `finished` once no candidate is left,
+/// when the file is closed.
+#[wasm_bindgen(js_name = documentRefineBatch)]
+pub fn document_refine_batch(entities: &[u32]) -> Result<JsValue, JsValue> {
     install_panic_hook();
     with_document(|document| {
-        let mut rf = RevitFile::open_bytes(document.bytes.clone()).map_err(err_str)?;
-        let mut report_progress = |stage: &'static str, done: usize, total: usize| {
-            let _ = progress.call3(
-                &JsValue::NULL,
-                &JsValue::from_str(stage),
-                &JsValue::from(done as u32),
-                &JsValue::from(total as u32),
-            );
+        let Some((rf, refiner)) = document.refining.as_mut() else {
+            return Err(JsValue::from_str("no saved-mesh pass running"));
         };
-        let attached = saved_meshes::attach(
-            &mut rf,
-            &mut document.model,
-            saved_meshes::CHUNK,
-            &mut report_progress,
-        )
-        .map_err(err_str)?;
-        drop(rf);
-        let report: SavedMeshReport = attached.report;
-        let model = if report.replaced > 0 {
-            page_model(&mut document.model)?
-        } else {
-            JsValue::NULL
-        };
-        let materials: Vec<EntityMaterials> = attached
-            .materials
-            .into_iter()
-            .map(|(entity, runs)| EntityMaterials { entity, runs })
-            .collect();
+        let entities: Vec<usize> = entities.iter().map(|&e| e as usize).collect();
+        let batch = refiner
+            .batch(rf, &mut document.model, &entities)
+            .map_err(err_str)?;
+        let report = refiner.report.clone();
+        let finished = refiner.is_done();
+        if finished {
+            document.refining = None;
+        }
+        let mut bodies = Vec::new();
+        let (mut vertex_starts, mut triangle_starts, mut edge_starts) =
+            (vec![0u32], vec![0u32], vec![0u32]);
+        let (mut positions, mut triangles, mut edges) = (Vec::new(), Vec::new(), Vec::new());
+        let mut runs = Vec::new();
+        for body in batch.bodies {
+            bodies.push(body.entity as u32);
+            positions.extend_from_slice(&body.positions);
+            triangles.extend_from_slice(&body.triangles);
+            edges.extend_from_slice(&body.edges);
+            vertex_starts.push((positions.len() / 3) as u32);
+            triangle_starts.push((triangles.len() / 3) as u32);
+            edge_starts.push((edges.len() / 6) as u32);
+            if let Some(body_runs) = body.runs {
+                runs.push(EntityRuns {
+                    entity: body.entity,
+                    runs: body_runs,
+                });
+            }
+        }
+        let done: Vec<u32> = batch.done.iter().map(|&e| e as u32).collect();
         object(&[
-            ("model", &model),
+            ("done", &js_sys::Uint32Array::from(done.as_slice()).into()),
+            (
+                "entities",
+                &js_sys::Uint32Array::from(bodies.as_slice()).into(),
+            ),
+            (
+                "vertexStarts",
+                &js_sys::Uint32Array::from(vertex_starts.as_slice()).into(),
+            ),
+            (
+                "triangleStarts",
+                &js_sys::Uint32Array::from(triangle_starts.as_slice()).into(),
+            ),
+            (
+                "edgeStarts",
+                &js_sys::Uint32Array::from(edge_starts.as_slice()).into(),
+            ),
+            (
+                "positions",
+                &js_sys::Float32Array::from(positions.as_slice()).into(),
+            ),
+            (
+                "triangles",
+                &js_sys::Uint32Array::from(triangles.as_slice()).into(),
+            ),
+            (
+                "edges",
+                &js_sys::Float32Array::from(edges.as_slice()).into(),
+            ),
+            ("runs", &to_js(&runs)?),
             ("report", &to_js(&report)?),
-            ("materials", &to_js(&materials)?),
+            ("finished", &JsValue::from_bool(finished)),
         ])
     })
 }

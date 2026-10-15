@@ -9,7 +9,7 @@ import {
   zoomPrevious,
   zoomSelection,
 } from '../../app/commands';
-import { documentSeq, requestSavedMeshes } from '../../app/document';
+import { documentSeq, requestSavedMeshes, savedMeshViewChanged } from '../../app/document';
 import { setViewer } from '../../app/viewerBridge';
 import { Viewer } from '../../engine/Viewer';
 import { type DisplayConfig, type ModelViewConfig, UNASSIGNED_LEVEL } from '../../engine/types';
@@ -124,6 +124,7 @@ export function ModelViewHost({ visible }: { visible: boolean }) {
         onViewCubeMenu: (x, y) => setMenu({ x, y, items: buildViewCubeMenu() }),
         onSectionBoxChange: (viewId, box) => useStore.getState().updateViewSettings(viewId, { sectionBox: box }),
         onNavModeChange: (mode) => useStore.getState().setNavMode(mode),
+        onViewSettled: savedMeshViewChanged,
       },
     );
     viewerRef.current = viewer;
@@ -170,24 +171,6 @@ export function ModelViewHost({ visible }: { visible: boolean }) {
         useStore.getState().pushToast('error', t('error.geometry', { detail: err instanceof Error ? err.message : String(err) }));
       });
   }, [doc, t]);
-
-  // Saved display meshes arrive after the boxed model: swap the bodies in place.
-  const refinedBody = doc?.refinedBody ?? null;
-  useEffect(() => {
-    const viewer = viewerRef.current;
-    if (!viewer || !ready || !refinedBody) return;
-    useStore.getState().consumeRefinedBody();
-    const seq = documentSeq();
-    const current = () => documentSeq() === seq;
-    void viewer
-      .replaceGeometry(refinedBody.glb, refinedBody.materials, buildProgress('build-refined', current))
-      .catch((err: unknown) => {
-        if (current()) useStore.getState().pushToast('error', t('error.geometry', { detail: err instanceof Error ? err.message : String(err) }));
-      })
-      .finally(() => {
-        if (current()) useStore.getState().setWork(null);
-      });
-  }, [ready, refinedBody, t]);
 
   // Active view → camera, clipping, style.
   const levelFeet = modelView?.storeyIndex !== undefined ? doc?.index.storeys[modelView.storeyIndex]?.elevationFeet : undefined;
@@ -321,10 +304,7 @@ export function ModelViewHost({ visible }: { visible: boolean }) {
  * A geometry build's progress for the progress bar, in whole percent, while
  * its document is still the open one.
  */
-function buildProgress(
-  stage: Extract<WorkStage, 'build-initial' | 'build-refined'>,
-  current: () => boolean,
-): (fraction: number) => void {
+function buildProgress(stage: Extract<WorkStage, 'build-initial'>, current: () => boolean): (fraction: number) => void {
   let last = -1;
   return (fraction) => {
     const done = Math.round(fraction * 100);

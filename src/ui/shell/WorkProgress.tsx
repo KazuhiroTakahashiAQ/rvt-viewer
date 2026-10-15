@@ -2,8 +2,8 @@ import { useTranslation } from 'react-i18next';
 import { type WorkProgress, useStore } from '../../state/store';
 
 /**
- * Share done of the whole saved-mesh pass (materials, meshes, GLB, the
- * page's build) or of the first build, 0..1.
+ * Share done of the whole saved-mesh pass (materials, then the elements
+ * drawn) or of the first build, 0..1.
  */
 export function workFraction(work: WorkProgress): number {
   const part = work.total > 0 ? Math.min(1, work.done / work.total) : 0;
@@ -11,13 +11,9 @@ export function workFraction(work: WorkProgress): number {
     case 'build-initial':
       return part;
     case 'materials':
-      return 0.05 * part;
+      return 0.02 * part;
     case 'meshes':
-      return 0.05 + 0.75 * part;
-    case 'glb':
-      return 0.82;
-    case 'build-refined':
-      return 0.85 + 0.15 * part;
+      return 0.02 + 0.98 * part;
   }
 }
 
@@ -34,8 +30,8 @@ export function WorkProgressBar({ className }: { className?: string }) {
   const label = useWorkLabel(work);
   if (!work) return null;
   const percent = Math.round(workFraction(work) * 100);
-  // One wasm call each, with no count to report: animate instead.
-  const indeterminate = work.stage === 'glb' || (work.stage === 'materials' && work.done === 0);
+  // One wasm call, with no count to report: animate instead.
+  const indeterminate = work.stage === 'materials' && work.done === 0;
   return (
     <div
       className={`work-progress${className ? ` ${className}` : ''}`}

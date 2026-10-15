@@ -53,6 +53,8 @@ function ElementProperties() {
   const filter = useStore((s) => s.propertiesFilter);
   const setFilter = useStore((s) => s.setPropertiesFilter);
   const select = useStore((s) => s.select);
+  // Bodies change kind as saved meshes are drawn.
+  const bodyRevision = useStore((s) => s.bodyRevision);
 
   const byCategory = useMemo(() => {
     const m = new Map<CategoryKey, number[]>();
@@ -71,7 +73,7 @@ function ElementProperties() {
     const ctx = { unit, locale: currentLocale(), t };
     const limited = shown.slice(0, 500);
     return mergeProperties(limited.map((e) => buildElementProperties(doc.index, doc.model, e, ctx)));
-  }, [doc, shown, unit, t]);
+  }, [doc, shown, unit, t, bodyRevision]);
 
   const records = shown.map((e) => doc.index.byIndex.get(e)).filter((r) => !!r);
   const first = records[0];

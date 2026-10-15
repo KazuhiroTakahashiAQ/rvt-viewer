@@ -19,6 +19,10 @@
 //! - A body with a transparent face (a window's glass) is drawn in the
 //!   materials Revit saved for its faces ([`MaterialRun`]); the others keep
 //!   the element's colour.
+//!
+//! [`Refiner`] does it a batch of elements at a time, in the order the
+//! viewer asks for them (what is on screen first), and hands each body over
+//! ready to draw ([`Body`]).
 
 use crate::brep::{self, Decoder, P3};
 use rvt::RevitFile;
@@ -31,7 +35,7 @@ use rvt::native_graphics_traversal::{GraphicsTransform, select_graphics_with_res
 use rvt::native_parameters::ObjectGraph;
 use rvt::native_saved_materials::Resolver;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// rvt-rs's detail level for saved meshes: Revit's fine representation.
 const DETAIL_LEVEL: i64 = 3;
@@ -51,6 +55,228 @@ pub struct MaterialRun {
     pub opacity: f32,
 }
 
+/// A body drawn from its saved mesh, as the page draws it: in glTF's frame
+/// (metres, Y up) like [`rvt::ifc::gltf::model_to_glb`]'s, wound outward
+/// (by its signed volume, as the page orients the GLB's bodies), with its
+/// crease edges.
+pub struct Body {
+    pub entity: usize,
+    /// `x, y, z` per vertex.
+    pub positions: Vec<f32>,
+    /// Three vertex indices per triangle.
+    pub triangles: Vec<u32>,
+    /// Segment end points, `x, y, z` each: the edges between faces meeting
+    /// at more than [`CREASE_DEGREES`] and the open ones, as three.js's
+    /// `EdgesGeometry` finds them.
+    pub edges: Vec<f32>,
+    /// The body's triangles in runs of one material, in order, where one is
+    /// transparent; `None` to draw it in the element's colour.
+    pub runs: Option<Vec<MaterialRun>>,
+}
+
+/// What [`Refiner::batch`] did.
+#[derive(Default)]
+pub struct Batch {
+    /// New bodies, and earlier ones again whose runs changed.
+    pub bodies: Vec<Body>,
+    /// The candidates the batch took, drawn or not.
+    pub done: Vec<usize>,
+}
+
+/// The crease angle of the viewer's edges.
+pub const CREASE_DEGREES: f64 = 25.0;
+
+/// Elements decoded per pass where all are wanted ([`attach`]). Each pass
+/// holds its elements' graphs and the symbols they draw, as JSON values
+/// many times the size of the file's bytes (Snowdon Towers: 3,555
+/// elements and 3,525 symbols took about 2.9 GB at once), and drops them
+/// before the next.
+pub const CHUNK: usize = 500;
+
+/// Record classes the material lookup reads besides the drawn elements' own
+/// records: materials, their appearances, object styles, and the wall and
+/// floor types that give their instances one material.
+const MATERIAL_CLASSES: [&str; 5] = [
+    "MaterialElem",
+    "AppearanceAssetElem",
+    "GStyleElem",
+    "BasicWallType",
+    "FloorAttributes",
+];
+
+/// Replaces box bodies with the meshes Revit saved for display, a batch of
+/// elements at a time, in the order the caller wants them.
+///
+/// The material lookup reads the materials once ([`MATERIAL_CLASSES`]),
+/// and each element's own record and its symbols' with its graphics: the
+/// paint of a face is on its element (or symbol), the rest is shared. Where
+/// an instance's face resolves to no material of its own, it takes the one
+/// another instance of the same symbol resolves it to ([`Looks`]); an
+/// earlier body whose runs change that way is sent again.
+pub struct Refiner {
+    /// Candidates not taken yet: entity index → ElementId.
+    pending: BTreeMap<usize, u64>,
+    resolver: Resolver,
+    /// ElementIds whose material-channel record the resolver has read.
+    ingested: HashSet<u64>,
+    looks: Looks,
+    drawn: HashMap<usize, Drawn>,
+    /// Face keys no instance has resolved yet → the bodies drawn without.
+    waiting: HashMap<FaceKey, Vec<usize>>,
+    pub report: SavedMeshReport,
+    /// Why faces and objects were left out, with counts.
+    pub failures: BTreeMap<String, usize>,
+}
+
+/// A replaced body's ElementId, face-key groups and the runs last sent.
+struct Drawn {
+    id: u64,
+    keys: Vec<(FaceKey, usize)>,
+    runs: Option<Vec<MaterialRun>>,
+}
+
+impl Refiner {
+    /// The candidates of `model`: bodies that are a box rvt-rs's `attach`
+    /// would replace, or a turned one ([`boxed_bodies`]).
+    pub fn new(rf: &mut RevitFile, model: &IfcModel) -> anyhow::Result<Self> {
+        let pending: BTreeMap<usize, u64> = boxed_bodies(model)
+            .into_iter()
+            .map(|(id, index)| (index, id))
+            .collect();
+        let mut resolver = Resolver::default_viewport_profile();
+        if !pending.is_empty() {
+            let mut options = graph_options([MATERIAL_CHANNEL]);
+            options.selected_classes = MATERIAL_CLASSES.iter().map(|c| c.to_string()).collect();
+            native_document::extract_graphs(rf, &options, |record| resolver.ingest(&record))?;
+        }
+        Ok(Self {
+            report: SavedMeshReport {
+                candidates: pending.len(),
+                ..Default::default()
+            },
+            pending,
+            resolver,
+            ingested: HashSet::new(),
+            looks: Looks::default(),
+            drawn: HashMap::new(),
+            waiting: HashMap::new(),
+            failures: BTreeMap::new(),
+        })
+    }
+
+    /// The candidates not taken yet, by entity index.
+    pub fn pending(&self) -> impl Iterator<Item = usize> + '_ {
+        self.pending.keys().copied()
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Draw the candidates among `entities` from their saved meshes, in
+    /// `model` and as [`Body`]s; the others are left out.
+    pub fn batch(
+        &mut self,
+        rf: &mut RevitFile,
+        model: &mut IfcModel,
+        entities: &[usize],
+    ) -> anyhow::Result<Batch> {
+        let wanted: Vec<(u64, usize)> = entities
+            .iter()
+            .filter_map(|&entity| self.pending.remove(&entity).map(|id| (id, entity)))
+            .collect();
+        let mut batch = Batch {
+            bodies: Vec::new(),
+            done: wanted.iter().map(|&(_, entity)| entity).collect(),
+        };
+        if wanted.is_empty() {
+            return Ok(batch);
+        }
+        let (resolver, ingested) = (&mut self.resolver, &mut self.ingested);
+        let mut records = graphics_records(
+            rf,
+            wanted.iter().map(|&(id, _)| id).collect(),
+            &mut |record| {
+                if ingested.insert(record.identity.element_id) {
+                    resolver.ingest(&record)?;
+                }
+                Ok(())
+            },
+        )?;
+        for graph in records.values_mut().filter_map(|r| r.graph.as_mut()) {
+            relax(graph);
+        }
+        let resolver = |id: u64| records.get(&id).and_then(|r| r.graph.as_ref());
+        let mut decoders: HashMap<u64, Decoder> = HashMap::new();
+        let mut fresh = Vec::new();
+        for &(id, index) in &wanted {
+            let Some(graph) = resolver(id) else {
+                continue;
+            };
+            let mesh = element_mesh(id, graph, &resolver, &mut decoders);
+            if mesh.triangle_count() == 0 {
+                continue;
+            }
+            self.report.replaced += 1;
+            self.report.triangles += mesh.triangle_count();
+            if let Some(keys) = set_mesh(model, index, mesh) {
+                fresh.push((index, id, keys));
+            }
+        }
+        for decoder in decoders.values() {
+            for (reason, n) in &decoder.failures {
+                *self.failures.entry(reason.clone()).or_default() += n;
+            }
+        }
+        drop(decoders);
+        drop(records);
+
+        // Looks: this batch's own first, so that its bodies see each other's.
+        let mut shared_now = Vec::new();
+        for (_, id, keys) in &fresh {
+            for &(key, _) in keys {
+                if self.looks.learn(&self.resolver, *id, key) {
+                    shared_now.push(key);
+                }
+            }
+        }
+        for (index, id, keys) in fresh {
+            for &(key, _) in &keys {
+                if self.looks.lacks(id, key) {
+                    self.waiting.entry(key).or_default().push(index);
+                }
+            }
+            let runs = material_runs(&keys, |key| self.looks.of(id, key));
+            batch.bodies.extend(body(model, index, runs.clone()));
+            self.drawn.insert(index, Drawn { id, keys, runs });
+        }
+        // Earlier bodies whose faces another instance has now resolved.
+        let mut again = BTreeSet::new();
+        for key in shared_now {
+            again.extend(self.waiting.remove(&key).unwrap_or_default());
+        }
+        for index in again {
+            let Some(drawn) = self.drawn.get_mut(&index) else {
+                continue;
+            };
+            let runs = material_runs(&drawn.keys, |key| self.looks.of(drawn.id, key));
+            if runs != drawn.runs {
+                drawn.runs = runs.clone();
+                batch.bodies.extend(body(model, index, runs));
+            }
+        }
+        Ok(batch)
+    }
+
+    /// The runs of the replaced bodies with a transparent face, by entity.
+    pub fn materials(&self) -> BTreeMap<usize, Vec<MaterialRun>> {
+        self.drawn
+            .iter()
+            .filter_map(|(&index, drawn)| drawn.runs.clone().map(|runs| (index, runs)))
+            .collect()
+    }
+}
+
 pub struct Attached {
     pub report: SavedMeshReport,
     /// Entity index → its runs, for the bodies with a transparent face.
@@ -59,83 +285,30 @@ pub struct Attached {
     pub failures: BTreeMap<String, usize>,
 }
 
-/// Elements decoded per pass over the document's saved graphics. Each pass
-/// holds its elements' graphs and the symbols they draw, as JSON values
-/// many times the size of the file's bytes (Snowdon Towers: 3,555
-/// elements and 3,525 symbols took about 2.9 GB at once), and drops them
-/// before the next.
-pub const CHUNK: usize = 500;
-
-/// What [`attach`] reports while it runs: `(stage, done, total)`, with
-/// stage `"materials"` (0 or 1 of 1) or `"meshes"` (elements done of
-/// candidates).
-pub type Progress<'a> = &'a mut dyn FnMut(&'static str, usize, usize);
-
-/// Replace the box bodies of `model` with the meshes Revit saved for display.
-pub fn attach(rf: &mut RevitFile, model: &mut IfcModel, chunk: usize, progress: Progress) -> anyhow::Result<Attached> {
-    let boxed = boxed_bodies(model);
-    let mut attached = Attached {
-        report: SavedMeshReport {
-            candidates: boxed.len(),
-            ..Default::default()
-        },
-        materials: BTreeMap::new(),
-        failures: BTreeMap::new(),
-    };
-    if boxed.is_empty() {
-        return Ok(attached);
-    }
-    progress("materials", 0, 1);
-    let materials = material_resolver(rf)?;
-    progress("materials", 1, 1);
-    // Instances of one family type draw the same symbols: keep them in the
-    // same pass.
-    let mut order: Vec<(u64, usize)> = boxed.iter().map(|(&id, &index)| (id, index)).collect();
-    order.sort_by_cached_key(|&(id, index)| (family_and_type(model, index), id));
-    let total = order.len();
-    let mut done = 0;
-    progress("meshes", 0, total);
-    // (entity, ElementId, its triangles' runs by face key) for the looks.
-    let mut drawn: Vec<(usize, u64, Vec<(FaceKey, usize)>)> = Vec::new();
+/// Replace all the box bodies of `model` with the meshes Revit saved for
+/// display, `chunk` elements a pass, instances of one family type together
+/// (they draw the same symbols).
+pub fn attach(rf: &mut RevitFile, model: &mut IfcModel, chunk: usize) -> anyhow::Result<Attached> {
+    let mut refiner = Refiner::new(rf, model)?;
+    let mut order: Vec<usize> = refiner.pending().collect();
+    order.sort_by_cached_key(|&index| (family_and_type(model, index), refiner.pending[&index]));
     for pass in order.chunks(chunk.max(1)) {
-        let mut records = graphics_records(rf, pass.iter().map(|&(id, _)| id).collect())?;
-        for graph in records.values_mut().filter_map(|r| r.graph.as_mut()) {
-            relax(graph);
-        }
-        let resolver = |id: u64| records.get(&id).and_then(|r| r.graph.as_ref());
-        let mut decoders: HashMap<u64, Decoder> = HashMap::new();
-        for &(id, index) in pass {
-            done += 1;
-            if done % 25 == 0 {
-                progress("meshes", done, total);
-            }
-            let Some(graph) = resolver(id) else {
-                continue;
-            };
-            let mesh = element_mesh(id, graph, &resolver, &mut decoders);
-            if mesh.triangle_count() == 0 {
-                continue;
-            }
-            attached.report.replaced += 1;
-            attached.report.triangles += mesh.triangle_count();
-            if let Some(keys) = set_mesh(model, index, mesh) {
-                drawn.push((index, id, keys));
-            }
-        }
-        for decoder in decoders.values() {
-            for (reason, n) in &decoder.failures {
-                *attached.failures.entry(reason.clone()).or_default() += n;
-            }
-        }
+        refiner.batch(rf, model, pass)?;
     }
-    progress("meshes", total, total);
-    let looks = Looks::new(&materials, &drawn);
-    for (index, id, keys) in drawn {
-        if let Some(runs) = material_runs(&keys, |key| looks.of(id, key)) {
-            attached.materials.insert(index, runs);
-        }
+    Ok(Attached {
+        report: refiner.report.clone(),
+        materials: refiner.materials(),
+        failures: refiner.failures,
+    })
+}
+
+fn graph_options<const N: usize>(channels: [u64; N]) -> Options {
+    Options {
+        max_graph_values: 1_000_000,
+        max_graph_objects: 1_000_000,
+        channels: BTreeSet::from(channels),
+        ..Default::default()
     }
-    Ok(attached)
 }
 
 /// Element `id`'s saved graphics as triangles in document feet, by face key:
@@ -147,10 +320,16 @@ fn element_mesh<'g>(
     decoders: &mut HashMap<u64, Decoder<'g>>,
 ) -> ElementMesh {
     let mut mesh = ElementMesh::default();
-    let upstream = rvt::native_saved_mesh::graphics_with_resolver_at_detail(graph, resolver, DETAIL_LEVEL);
+    let upstream =
+        rvt::native_saved_mesh::graphics_with_resolver_at_detail(graph, resolver, DETAIL_LEVEL);
     let add_upstream = |mesh: &mut ElementMesh| {
         for p in &upstream.primitives {
-            let key = (p.source_owner_id, p.face_tag, p.render_style_id, p.material_id);
+            let key = (
+                p.source_owner_id,
+                p.face_tag,
+                p.render_style_id,
+                p.material_id,
+            );
             mesh.add(&p.vertices, &p.triangles, key);
         }
     };
@@ -164,12 +343,24 @@ fn element_mesh<'g>(
         let Some(source) = resolver(owner) else {
             continue;
         };
-        let decoder = decoders.entry(owner).or_insert_with(|| Decoder::new(source));
+        let decoder = decoders
+            .entry(owner)
+            .or_insert_with(|| Decoder::new(source));
         for part in decoder.object(selected.object_index).iter() {
-            let key = (selected.source_owner_id, part.face_tag, part.render_style_id, part.material_id);
-            let vertices: Vec<P3> = part.vertices.iter().map(|&p| place(selected.world_transform, p)).collect();
+            let key = (
+                selected.source_owner_id,
+                part.face_tag,
+                part.render_style_id,
+                part.material_id,
+            );
+            let vertices: Vec<P3> = part
+                .vertices
+                .iter()
+                .map(|&p| place(selected.world_transform, p))
+                .collect();
             if mirrors(selected.world_transform) {
-                let flipped: Vec<[u32; 3]> = part.triangles.iter().map(|&[a, b, c]| [a, c, b]).collect();
+                let flipped: Vec<[u32; 3]> =
+                    part.triangles.iter().map(|&[a, b, c]| [a, c, b]).collect();
                 mesh.add(&vertices, &flipped, key);
             } else {
                 mesh.add(&vertices, &part.triangles, key);
@@ -261,7 +452,10 @@ fn boxed_bodies(model: &IfcModel) -> BTreeMap<u64, usize> {
             && !set.properties.iter().any(|p| {
                 p.name == "ProfileResolved" && matches!(p.value, PropertyValue::Boolean(true))
             });
-        by_id.entry(id).or_default().push(if boxed { index } else { usize::MAX });
+        by_id
+            .entry(id)
+            .or_default()
+            .push(if boxed { index } else { usize::MAX });
     }
     by_id
         .into_iter()
@@ -273,17 +467,14 @@ fn boxed_bodies(model: &IfcModel) -> BTreeMap<u64, usize> {
 }
 
 /// The saved-graphics records of `ids`, with the shared symbols their
-/// instances draw (`native_saved_scene::extract_at_detail`'s closure).
+/// instances draw (`native_saved_scene::extract_at_detail`'s closure);
+/// their material-channel records go to `material`.
 fn graphics_records(
     rf: &mut RevitFile,
     ids: BTreeSet<u64>,
+    material: &mut dyn FnMut(Record) -> anyhow::Result<()>,
 ) -> anyhow::Result<BTreeMap<u64, Record>> {
-    let mut options = Options {
-        max_graph_values: 1_000_000,
-        max_graph_objects: 1_000_000,
-        ..Default::default()
-    };
-    options.channels = BTreeSet::from([GRAPHICS_CHANNEL]);
+    let mut options = graph_options([MATERIAL_CHANNEL, GRAPHICS_CHANNEL]);
     let mut records = BTreeMap::<u64, Record>::new();
     let mut attempted = ids.clone();
     let mut wanted = ids;
@@ -293,7 +484,10 @@ fn graphics_records(
             break;
         }
         options.selected_ids = std::mem::take(&mut wanted);
-        native_document::extract(rf, &options, |record| {
+        native_document::extract_graphs(rf, &options, |record| {
+            if record.channel == MATERIAL_CHANNEL {
+                return material(record);
+            }
             records.entry(record.identity.element_id).or_insert(record);
             Ok(())
         })?;
@@ -301,7 +495,11 @@ fn graphics_records(
             let Some(graph) = &record.graph else {
                 continue;
             };
-            for object in graph.objects.iter().filter(|o| o.class_name == "InstanceInfo") {
+            for object in graph
+                .objects
+                .iter()
+                .filter(|o| o.class_name == "InstanceInfo")
+            {
                 let symbol = brep::identifier(&object.fields["m_symbolId"])
                     .and_then(|id| u64::try_from(id).ok())
                     .filter(|id| *id > 0);
@@ -312,19 +510,6 @@ fn graphics_records(
         }
     }
     Ok(records)
-}
-
-/// The document's saved materials, as `native_saved_scene` reads them.
-fn material_resolver(rf: &mut RevitFile) -> anyhow::Result<Resolver> {
-    let mut resolver = Resolver::default_viewport_profile();
-    let mut options = Options {
-        max_graph_values: 1_000_000,
-        max_graph_objects: 1_000_000,
-        ..Default::default()
-    };
-    options.channels = BTreeSet::from([MATERIAL_CHANNEL]);
-    native_document::extract(rf, &options, |record| resolver.ingest(&record))?;
-    Ok(resolver)
 }
 
 /// What selects a face's material besides its element: the shared symbol
@@ -338,24 +523,30 @@ type Look = (Option<[u8; 3]>, u8);
 /// resolves to no material of its own, it takes the one another instance of
 /// the same symbol resolves the same face to (the material lookup goes by
 /// the instance, and finds the type's materials for some instances only).
+#[derive(Default)]
 struct Looks {
     own: HashMap<(u64, FaceKey), Look>,
     shared: HashMap<FaceKey, Look>,
 }
 
 impl Looks {
-    fn new(resolver: &Resolver, drawn: &[(usize, u64, Vec<(FaceKey, usize)>)]) -> Self {
-        let mut own = HashMap::new();
-        let mut shared = HashMap::new();
-        for (_, id, keys) in drawn {
-            for &(key, _) in keys {
-                let look = *own.entry((*id, key)).or_insert_with(|| resolve(resolver, *id, key));
-                if key.0.is_some() && look.0.is_some() {
-                    shared.entry(key).or_insert(look);
-                }
-            }
+    /// Resolve `owner`'s face `key`; true when that gives the face's look
+    /// to the other instances of its symbol for the first time.
+    fn learn(&mut self, resolver: &Resolver, owner: u64, key: FaceKey) -> bool {
+        let look = *self
+            .own
+            .entry((owner, key))
+            .or_insert_with(|| resolve(resolver, owner, key));
+        if key.0.is_none() || look.0.is_none() || self.shared.contains_key(&key) {
+            return false;
         }
-        Self { own, shared }
+        self.shared.insert(key, look);
+        true
+    }
+
+    /// Whether `owner`'s face `key` waits for another instance's look.
+    fn lacks(&self, owner: u64, key: FaceKey) -> bool {
+        key.0.is_some() && self.of(owner, key).0.is_none()
     }
 
     fn of(&self, owner: u64, key: FaceKey) -> Look {
@@ -372,7 +563,10 @@ fn resolve(resolver: &Resolver, owner: u64, (source, face_tag, style, material):
         return (None, 255);
     };
     // The viewport default stands for no material of its own.
-    let color = m.material_id.map(|_| m.base_color).map(|c| [c[0], c[1], c[2]].map(unit_byte));
+    let color = m
+        .material_id
+        .map(|_| m.base_color)
+        .map(|c| [c[0], c[1], c[2]].map(unit_byte));
     let opacity = unit_byte(m.saved_opacity.unwrap_or(1.0));
     (color, opacity)
 }
@@ -423,7 +617,11 @@ fn mirrors(m: GraphicsTransform) -> bool {
 /// Draw entity `index` from `mesh`, in its placement's frame as rvt-rs's
 /// `attach` does, its triangles grouped by face key. Returns the groups'
 /// keys and sizes, in order.
-fn set_mesh(model: &mut IfcModel, index: usize, mesh: ElementMesh) -> Option<Vec<(FaceKey, usize)>> {
+fn set_mesh(
+    model: &mut IfcModel,
+    index: usize,
+    mesh: ElementMesh,
+) -> Option<Vec<(FaceKey, usize)>> {
     let IfcEntity::BuildingElement {
         location_feet: Some(origin),
         rotation_radians,
@@ -464,10 +662,154 @@ fn set_mesh(model: &mut IfcModel, index: usize, mesh: ElementMesh) -> Option<Vec
     Some(keys)
 }
 
+/// Entity `index`'s face set (as [`set_mesh`] writes it) as the page draws
+/// it, or `None` where it has none.
+fn body(model: &IfcModel, index: usize, runs: Option<Vec<MaterialRun>>) -> Option<Body> {
+    let IfcEntity::BuildingElement {
+        location_feet,
+        rotation_radians,
+        solid_shape:
+            Some(SolidShape::TriangulatedFaceSet {
+                vertices_feet,
+                triangles,
+            }),
+        ..
+    } = &model.entities[index]
+    else {
+        return None;
+    };
+    let origin = location_feet.unwrap_or([0.0; 3]);
+    let (sin, cos) = rotation_radians
+        .filter(|r| r.is_finite())
+        .unwrap_or(0.0)
+        .sin_cos();
+    // The element's placement, then glTF's frame (`Z_UP_FEET_TO_Y_UP_METRES`).
+    let place = |p: [f64; 3]| -> [f32; 3] {
+        let x = origin[0] + cos * p[0] - sin * p[1];
+        let y = origin[1] + sin * p[0] + cos * p[1];
+        let z = origin[2] + p[2];
+        [(x * FOOT) as f32, (z * FOOT) as f32, (-y * FOOT) as f32]
+    };
+    let triangles: Vec<[u32; 3]> = triangles.iter().map(|t| [t.0, t.1, t.2]).collect();
+    let flip = signed_volume(vertices_feet, &triangles) < 0.0;
+    let mut out = Body {
+        entity: index,
+        positions: vertices_feet.iter().flat_map(|&p| place(p)).collect(),
+        triangles: triangles
+            .iter()
+            .flat_map(|&[a, b, c]| if flip { [a, c, b] } else { [a, b, c] })
+            .collect(),
+        edges: Vec::new(),
+        runs,
+    };
+    for [a, b] in crease_edges(vertices_feet, &triangles) {
+        out.edges.extend(place(a));
+        out.edges.extend(place(b));
+    }
+    Some(out)
+}
+
+const FOOT: f64 = 0.3048;
+
+/// The signed volume of a triangle mesh, positive where its triangles wind
+/// counter-clockwise seen from outside; open or flat meshes, about zero,
+/// count as outward (the page's `signedVolume`).
+fn signed_volume(vertices: &[P3], triangles: &[[u32; 3]]) -> f64 {
+    let volume: f64 = triangles
+        .iter()
+        .filter_map(|t| {
+            let [a, b, c] = t.map(|v| vertices.get(v as usize));
+            let (a, b, c) = (a?, b?, c?);
+            let cross = [
+                b[1] * c[2] - b[2] * c[1],
+                b[2] * c[0] - b[0] * c[2],
+                b[0] * c[1] - b[1] * c[0],
+            ];
+            Some(a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2])
+        })
+        .sum::<f64>()
+        / 6.0;
+    if volume.abs() < 1e-12 { 1.0 } else { volume }
+}
+
+/// The edges three.js's `EdgesGeometry` draws for these triangles at
+/// [`CREASE_DEGREES`]: where two faces meet at more than that angle, and
+/// those of one face only. Vertices are matched by position to 1e-4 feet
+/// after rounding to `f32`, as the page matched the GLB's.
+fn crease_edges(vertices: &[P3], triangles: &[[u32; 3]]) -> Vec<[P3; 2]> {
+    type Key = [i64; 3];
+    /// A face's edge not matched yet: its vertices and the face's normal.
+    type Open = Option<(u32, u32, P3)>;
+    let threshold = CREASE_DEGREES.to_radians().cos();
+    let key = |p: P3| -> Key { p.map(|v| (f64::from(v as f32) * 1e4).round() as i64) };
+    let mut open: HashMap<(Key, Key), Open> = HashMap::new();
+    // Insertion order, for a stable output.
+    let mut order: Vec<(Key, Key)> = Vec::new();
+    let mut out = Vec::new();
+    for t in triangles {
+        let Some(p) = t
+            .iter()
+            .map(|&v| vertices.get(v as usize).copied())
+            .collect::<Option<Vec<P3>>>()
+        else {
+            continue;
+        };
+        let keys = [key(p[0]), key(p[1]), key(p[2])];
+        if keys[0] == keys[1] || keys[1] == keys[2] || keys[2] == keys[0] {
+            continue;
+        }
+        let normal = unit_normal(p[0], p[1], p[2]);
+        for j in 0..3 {
+            let k = (j + 1) % 3;
+            let edge = (keys[j], keys[k]);
+            let reverse = (keys[k], keys[j]);
+            if let Some(slot) = open.get_mut(&reverse).filter(|slot| slot.is_some()) {
+                let (_, _, other) = slot.take().expect("filtered on some");
+                if dot(normal, other) <= threshold {
+                    out.push([p[j], p[k]]);
+                }
+            } else if let std::collections::hash_map::Entry::Vacant(slot) = open.entry(edge) {
+                slot.insert(Some((t[j], t[k], normal)));
+                order.push(edge);
+            }
+        }
+    }
+    for edge in order {
+        if let Some(Some((a, b, _))) = open.get(&edge) {
+            out.push([vertices[*a as usize], vertices[*b as usize]]);
+        }
+    }
+    out
+}
+
+/// `(c - b) × (a - b)`, normalised: three.js's `Triangle.getNormal`.
+fn unit_normal(a: P3, b: P3, c: P3) -> P3 {
+    let u = [c[0] - b[0], c[1] - b[1], c[2] - b[2]];
+    let v = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let n = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let length = dot(n, n).sqrt();
+    if length > 0.0 {
+        n.map(|v| v / length)
+    } else {
+        [0.0; 3]
+    }
+}
+
+fn dot(a: P3, b: P3) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
 /// A body's runs of one look, from its face-key groups: where one is
 /// transparent, so that those bodies are drawn in their faces' colours and
 /// the others keep the element's.
-fn material_runs(keys: &[(FaceKey, usize)], look: impl Fn(FaceKey) -> Look) -> Option<Vec<MaterialRun>> {
+fn material_runs(
+    keys: &[(FaceKey, usize)],
+    look: impl Fn(FaceKey) -> Look,
+) -> Option<Vec<MaterialRun>> {
     let mut runs: Vec<(Look, usize)> = Vec::new();
     for &(key, count) in keys {
         let look = look(key);

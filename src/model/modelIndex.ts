@@ -52,6 +52,20 @@ export function bodyKind(set: PropertySet | undefined): BodyKind {
   return 'decoded';
 }
 
+/**
+ * Mark `entities` as drawn from their saved meshes, in their records and
+ * their `BodySource` property, as the model of a finished pass says.
+ */
+export function markSavedMeshBodies(index: ModelIndex, entities: ArrayLike<number>): void {
+  for (let i = 0; i < entities.length; i++) {
+    const record = index.byIndex.get(entities[i]!);
+    if (!record) continue;
+    record.body = 'savedMesh';
+    const property = record.entity.property_set?.properties.find((p) => p.name === 'BodySource');
+    if (property && property.value.kind === 'Text') property.value = { kind: 'Text', value: SAVED_MESH_BODY };
+  }
+}
+
 export interface StoreyRecord {
   index: number;
   name: string;

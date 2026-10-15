@@ -9,10 +9,10 @@ import type { Projection } from '../engine/CameraRig';
 import type { VisualStyle } from '../engine/modelMaterials';
 import { type CategoryOverride, type NavMode, type PlanRange, type SectionBoxState, type TempMode, UNASSIGNED_LEVEL } from '../engine/types';
 import { type CategoryKey, hiddenByDefault } from '../model/categories';
-import type { ModelIndex } from '../model/modelIndex';
+import { type ModelIndex, markSavedMeshBodies } from '../model/modelIndex';
 import type { LengthUnit } from '../model/units';
 import { type ViewDef, initialViewId, listViews } from '../model/views';
-import type { BodyMaterials, ExportDiagnostics, FileMetadata, IfcModel, Schedule, Summary } from '../wasm/types';
+import type { ExportDiagnostics, FileMetadata, IfcModel, Schedule, Summary } from '../wasm/types';
 import type { LoadStep, RefineStage, SavedMeshReport } from '../worker/protocol';
 
 export interface LoadedDocument {
@@ -29,18 +29,15 @@ export interface LoadedDocument {
   hasGeometry: boolean;
   /** Second pass drawing boxed bodies from Revit's saved display meshes. */
   savedMeshes: { status: SavedMeshStatus; report: SavedMeshReport | null };
-  /** GLB with the saved meshes and their materials, present until the viewer has swapped it in. */
-  refinedBody: { glb: Uint8Array; materials: BodyMaterials[] } | null;
 }
 
 export type SavedMeshStatus = 'pending' | 'done' | 'failed' | 'off';
 
 /**
  * The heavy work in progress, for the progress bar: building the first
- * geometry on the page, then the saved-mesh pass's stages in the worker
- * ([`RefineStage`]), then building its geometry on the page.
+ * geometry on the page, then the saved-mesh pass's stages ([`RefineStage`]).
  */
-export type WorkStage = 'build-initial' | RefineStage | 'build-refined';
+export type WorkStage = 'build-initial' | RefineStage;
 
 export interface WorkProgress {
   stage: WorkStage;
@@ -130,6 +127,8 @@ interface State {
   prefs: Prefs;
   /** Kept apart from `doc` so that progress updates re-render only the bars. */
   work: WorkProgress | null;
+  /** Changes when bodies of the open document change kind (saved meshes drawn). */
+  bodyRevision: number;
 }
 
 interface Actions {
@@ -141,13 +140,10 @@ interface Actions {
   dismissLoadError(): void;
   closeDocument(): void;
   consumeGlb(): void;
-  /** The saved-mesh pass finished: `refined` carries the new model when bodies changed. */
-  savedMeshesDone(
-    status: Exclude<SavedMeshStatus, 'pending' | 'off'>,
-    report: SavedMeshReport | null,
-    refined?: { model: IfcModel; index: ModelIndex; glb: Uint8Array; materials: BodyMaterials[] },
-  ): void;
-  consumeRefinedBody(): void;
+  /** The saved-mesh pass finished. */
+  savedMeshesDone(status: Exclude<SavedMeshStatus, 'pending' | 'off'>, report: SavedMeshReport | null): void;
+  /** These entities are drawn from their saved meshes now. */
+  markSavedMeshes(entities: ArrayLike<number>): void;
   setWork(work: WorkProgress | null): void;
 
   openView(id: string): void;
@@ -217,6 +213,7 @@ const initialDocState = {
   doc: null,
   loading: null,
   work: null,
+  bodyRevision: 0,
   views: [] as ViewDef[],
   openViews: [] as string[],
   activeViewId: null,
@@ -273,20 +270,14 @@ export const useStore = create<State & Actions>()(
       dismissLoadError: () => set({ loadError: null }),
       closeDocument: () => set({ ...initialDocState, loadError: null, dialog: null, ribbonTab: 'view' }),
       consumeGlb: () => set((s) => (s.doc ? { doc: { ...s.doc, glb: null } } : {})),
-      savedMeshesDone: (status, report, refined) =>
+      savedMeshesDone: (status, report) =>
+        set((s) => (s.doc ? { doc: { ...s.doc, savedMeshes: { status, report } } } : {})),
+      markSavedMeshes: (entities) =>
         set((s) => {
-          if (!s.doc) return {};
-          const doc = { ...s.doc, savedMeshes: { status, report } };
-          if (refined) {
-            Object.assign(doc, {
-              model: refined.model,
-              index: refined.index,
-              refinedBody: { glb: refined.glb, materials: refined.materials },
-            });
-          }
-          return { doc };
+          if (!s.doc || entities.length === 0) return {};
+          markSavedMeshBodies(s.doc.index, entities);
+          return { bodyRevision: s.bodyRevision + 1 };
         }),
-      consumeRefinedBody: () => set((s) => (s.doc ? { doc: { ...s.doc, refinedBody: null } } : {})),
       setWork: (work) => set({ work }),
 
       openView: (id) =>

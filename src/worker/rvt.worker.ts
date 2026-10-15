@@ -9,14 +9,18 @@
  * dropped once wasm holds them, and the GLB is transferred, not copied.
  *
  * The heavy steps run one at a time: the saved-mesh pass waits for the
- * page's `refine` message, sent once it has drawn the first geometry.
+ * page's `refine-begin`, sent once it has drawn the first geometry. It then
+ * draws the boxed elements a batch at a time in the order the page asks
+ * for (what is on screen first), one patch ahead of the page: the next is
+ * sent when the page has drawn the last.
  */
 
 import init, {
-  documentAttachSavedMeshes,
   documentGlb,
   documentIfcStep,
   documentPlanSvg,
+  documentRefineBatch,
+  documentRefineBegin,
   documentScene,
   documentSchedule,
   documentScheduleCsv,
@@ -25,7 +29,6 @@ import init, {
   quickSummary,
 } from '../wasm/pkg/rvt.js';
 import type {
-  BodyMaterials,
   ExportDiagnostics,
   FileMetadata,
   IfcModel,
@@ -33,11 +36,12 @@ import type {
   Schedule,
   Summary,
 } from '../wasm/types';
-import type { ExportKind, FromWorker, RefineStage, SavedMeshReport, ToWorker } from './protocol';
+import { type ExportKind, type FromWorker, type RefinePatch, type ToWorker, patchBuffers } from './protocol';
 
 let opened = false;
-/** Whether the saved-mesh pass is wanted and has not run yet. */
-let refinePending = false;
+/** Whether the saved-mesh pass is wanted and has not started yet. */
+let refineWanted = false;
+let entityCount = 0;
 
 const send = (msg: FromWorker, transfer: Transferable[] = []): void => {
   (self as unknown as { postMessage: (m: unknown, t: Transferable[]) => void }).postMessage(msg, transfer);
@@ -75,51 +79,159 @@ async function open(bytes: Uint8Array, savedMeshes: boolean): Promise<void> {
   send({ type: 'progress', step: 'schedule' });
   const schedule = documentSchedule() as Schedule;
 
+  entityCount = result.model.entities.length;
   send({ type: 'ready', model: result.model, diagnostics: result.diagnostics, scene, types, glb, schedule }, [
     glb.buffer as ArrayBuffer,
   ]);
-  refinePending = savedMeshes;
+  refineWanted = savedMeshes;
 }
+
+// --- saved-mesh pass ---------------------------------------------------------
+
+/*
+ * Batch sizes: each batch walks the file's partitions once or twice, a
+ * cost whatever its size, so batches start small, for the first bodies on
+ * screen to show soon, and double up to MAX_BATCH; a new order from the
+ * page starts them small again. A batch slower than SLOW_BATCH_MS halves
+ * the next, for a new order to take effect soon.
+ */
+const FIRST_BATCH = 24;
+const MIN_BATCH = 8;
+const MAX_BATCH = 500;
+const SLOW_BATCH_MS = 3000;
+
+interface Refining {
+  /** By entity index: 1 once taken. */
+  taken: Uint8Array;
+  candidates: Uint32Array;
+  order: Uint32Array;
+  /** The first `visible` of `order` are on screen. */
+  visible: number;
+  cursor: number;
+  /** Elements in the next batch. */
+  size: number;
+  /** The next patch, made while the page draws the last. */
+  ahead: RefinePatch | null;
+  awaitingAck: boolean;
+  /** Send without waiting for the page: an export wants every body. */
+  draining: boolean;
+  finished: boolean;
+  scheduled: boolean;
+}
+
+let refining: Refining | null = null;
 
 /**
  * Second pass: draw the bodies rvt-rs could only box (doors, windows,
- * furniture, …) from the meshes Revit saved for display. Slow on large
- * files, so the boxed model is shown first; it reports its stages as it
- * goes.
+ * furniture, …) from the meshes Revit saved for display. Reads the
+ * materials first, then waits for the page's order.
  */
-function refine(): void {
-  if (!opened || !refinePending) return;
-  refinePending = false;
-  const progress = (stage: RefineStage, done: number, total: number): void => {
-    send({ type: 'refine-progress', stage, done, total });
-  };
+function refineBegin(): void {
+  if (!opened || !refineWanted) return;
+  refineWanted = false;
   try {
-    const result = documentAttachSavedMeshes(progress) as {
-      model: IfcModel | null;
-      report: SavedMeshReport;
-      materials: BodyMaterials[];
+    send({ type: 'refine-progress', stage: 'materials', done: 0, total: 1 });
+    const candidates = documentRefineBegin();
+    send({ type: 'refine-candidates', candidates: candidates.slice() });
+    if (candidates.length === 0) return;
+    refining = {
+      taken: new Uint8Array(entityCount),
+      candidates,
+      order: candidates,
+      visible: 0,
+      cursor: 0,
+      size: FIRST_BATCH,
+      ahead: null,
+      awaitingAck: false,
+      draining: false,
+      finished: false,
+      scheduled: false,
     };
-    if (!result.model) {
-      send({ type: 'refined', refined: null, report: result.report });
-      return;
-    }
-    progress('glb', 0, 1);
-    const glb = documentGlb();
-    send(
-      {
-        type: 'refined',
-        refined: { model: result.model, glb, materials: result.materials, report: result.report },
-        report: result.report,
-      },
-      [glb.buffer as ArrayBuffer],
-    );
   } catch (err) {
-    send({ type: 'refined', refined: null, report: null, error: errorText(err) });
+    send({ type: 'refine-failed', error: errorText(err) });
   }
+}
+
+/** The next batch: the first candidates of the order not taken, from one tier. */
+function nextBatch(r: Refining): number[] {
+  let at = r.cursor;
+  while (at < r.order.length && r.taken[r.order[at]!]) at++;
+  r.cursor = at;
+  // On-screen candidates and the others go in batches of their own.
+  const end = at < r.visible ? r.visible : r.order.length;
+  const size = r.draining ? MAX_BATCH : r.size;
+  const batch: number[] = [];
+  for (; at < end && batch.length < size; at++) {
+    const entity = r.order[at]!;
+    if (!r.taken[entity]) batch.push(entity);
+  }
+  if (batch.length === 0) {
+    // Candidates the order left out.
+    for (const entity of r.candidates) {
+      if (batch.length >= size) break;
+      if (!r.taken[entity]) batch.push(entity);
+    }
+  }
+  return batch;
+}
+
+function makePatch(r: Refining): RefinePatch {
+  const batch = nextBatch(r);
+  for (const entity of batch) r.taken[entity] = 1;
+  const started = performance.now();
+  const patch = documentRefineBatch(Uint32Array.from(batch)) as RefinePatch;
+  // Nothing left to ask for: stop even if rvt-rs disagrees.
+  if (batch.length === 0) patch.finished = true;
+  const slow = performance.now() - started > SLOW_BATCH_MS;
+  r.size = slow ? Math.max(MIN_BATCH, Math.round(r.size / 2)) : Math.min(MAX_BATCH, r.size * 2);
+  return patch;
+}
+
+/** Make and send patches while the page keeps up; one at a time. */
+function refineStep(): void {
+  const r = refining;
+  if (!r) return;
+  r.scheduled = false;
+  try {
+    if (!r.ahead && !r.finished) r.ahead = makePatch(r);
+    if (r.ahead && (!r.awaitingAck || r.draining)) {
+      const patch = r.ahead;
+      r.ahead = null;
+      r.awaitingAck = true;
+      r.finished = patch.finished;
+      send({ type: 'refine-patch', patch }, patchBuffers(patch));
+    }
+  } catch (err) {
+    refining = null;
+    send({ type: 'refine-failed', error: errorText(err) });
+    return;
+  }
+  if (r.finished && !r.ahead) {
+    refining = null;
+    return;
+  }
+  // The next one ahead, after the messages waiting (a new order, an ack).
+  if (!r.ahead) scheduleRefine(r);
+}
+
+function scheduleRefine(r: Refining): void {
+  if (r.scheduled) return;
+  r.scheduled = true;
+  setTimeout(refineStep, 0);
+}
+
+/** Draw every body left now, sending each patch as it is made. */
+function refineDrain(): void {
+  const r = refining;
+  if (!r) return;
+  r.draining = true;
+  while (refining === r) refineStep();
 }
 
 function runExport(kind: ExportKind): Uint8Array | string {
   if (!opened) throw new Error('no model');
+  // The model's bodies are complete once the saved-mesh pass is.
+  refineDrain();
   switch (kind) {
     case 'ifc':
       return documentIfcStep();
@@ -140,8 +252,23 @@ self.addEventListener('message', (ev: MessageEvent<ToWorker>) => {
     case 'open':
       open(msg.bytes, msg.savedMeshes).catch((err: unknown) => send({ type: 'error', message: errorText(err) }));
       return;
-    case 'refine':
-      refine();
+    case 'refine-begin':
+      refineBegin();
+      return;
+    case 'refine-order':
+      if (refining) {
+        refining.order = msg.order;
+        refining.visible = msg.visible;
+        refining.cursor = 0;
+        refining.size = FIRST_BATCH;
+        if (!refining.awaitingAck) scheduleRefine(refining);
+      }
+      return;
+    case 'refine-ack':
+      if (refining) {
+        refining.awaitingAck = false;
+        scheduleRefine(refining);
+      }
       return;
     case 'export': {
       try {
