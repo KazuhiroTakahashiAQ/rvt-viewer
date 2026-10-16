@@ -133,7 +133,8 @@ export class Viewer {
   private navMode: NavMode = 'select';
   private drag: Drag | null = null;
   private touches = new Map<number, { x: number; y: number }>();
-  private touchGesture: { dist: number; cx: number; cy: number; moved: boolean } | null = null;
+  /** `pivot`: what a one-finger orbit turns about, from its first move. */
+  private touchGesture: { dist: number; cx: number; cy: number; moved: boolean; pivot?: THREE.Vector3 } | null = null;
   private lastMiddleDown = 0;
   private hoverQueued: { x: number; y: number } | null = null;
   private dirty = true;
@@ -199,8 +200,8 @@ export class Viewer {
       onPickDirection: (dir) => this.lookFrom(dir),
       onOrbit: (dYaw, dPitch) => {
         this.rig.cancelAnimation();
-        this.rig.orbit(dYaw, dPitch, this.orbitPivot(null));
-        this.showPivot(this.orbitPivot(null));
+        this.rig.orbit(dYaw, dPitch, this.cubePivot());
+        this.showPivot(this.cubePivot());
         this.requestRender();
       },
       onOrbitEnd: () => this.hidePivot(),
@@ -1058,7 +1059,19 @@ export class Viewer {
     this.callbacks.onHover(entity, clientX, clientY);
   }
 
-  private orbitPivot(clientPos: { x: number; y: number } | null): THREE.Vector3 {
+  /**
+   * The point a drag on the view orbits about: the nearest visible model
+   * surface at the middle of the view, else the camera target (which the
+   * view is centred on).
+   */
+  private viewPivot(): THREE.Vector3 {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const hit = this.model?.raycast(this.castRay(rect.left + rect.width / 2, rect.top + rect.height / 2), this.clipPlanes)[0];
+    return hit ? hit.point.clone() : this.rig.pose.target.clone();
+  }
+
+  /** The point a ViewCube drag orbits about: the selection's centre, else the model's (inside the section box). */
+  private cubePivot(): THREE.Vector3 {
     if (this.selection.size > 0 && this.model) {
       const box = new THREE.Box3();
       for (const e of this.selection) {
@@ -1066,10 +1079,6 @@ export class Viewer {
         if (b) box.union(b);
       }
       if (!box.isEmpty()) return box.getCenter(new THREE.Vector3());
-    }
-    if (clientPos) {
-      const hit = this.pick(clientPos.x, clientPos.y);
-      if (hit) return hit.point;
     }
     if (this.model && !this.model.box.isEmpty()) {
       const box = this.clipBox ? this.model.box.clone().intersect(this.clipBox) : this.model.box;
@@ -1221,7 +1230,7 @@ export class Viewer {
     this.setHover(null);
     this.callbacks.onHover(null, ev.clientX, ev.clientY);
     if (kind === 'orbit') {
-      const pivot = this.orbitPivot(from);
+      const pivot = this.viewPivot();
       this.drag = { kind: 'orbit', id: ev.pointerId, x: from.x, y: from.y, pivot };
       this.showPivot(pivot);
     } else {
@@ -1438,7 +1447,8 @@ export class Viewer {
       if (!g.moved && this.touchStart && Math.hypot(c.cx - this.touchStart.x, c.cy - this.touchStart.y) < CLICK_SLOP * 2) return;
       g.moved = true;
       if (this.rig.orbitEnabled) {
-        this.rig.orbit(-dx * ORBIT_SPEED, -dy * ORBIT_SPEED, this.orbitPivot(null));
+        g.pivot ??= this.viewPivot();
+        this.rig.orbit(-dx * ORBIT_SPEED, -dy * ORBIT_SPEED, g.pivot);
       } else {
         this.rig.panPixels(dx, dy, this.height);
       }
@@ -1450,7 +1460,7 @@ export class Viewer {
         this.rig.zoomAt(g.dist / c.dist, ndc.x, ndc.y);
       }
     }
-    this.touchGesture = { ...c, moved: g.moved };
+    this.touchGesture = { ...c, moved: g.moved, pivot: g.pivot };
     this.requestRender();
   }
 

@@ -251,7 +251,7 @@ test.describe('with a sample model', () => {
     expect(errors).toEqual([]);
   });
 
-  test('Ctrl + drag orbits, Shift + drag pans, and a click with either still selects', async ({ page }) => {
+  test('Ctrl + drag orbits about the middle of the view, Shift + drag pans, and a click with either still selects', async ({ page }) => {
     test.setTimeout(300_000);
     const errors = collectErrors(page);
     await page.goto('./');
@@ -260,8 +260,9 @@ test.describe('with a sample model', () => {
     await expect(page.locator('.statusbar')).not.toHaveAttribute('data-saved-meshes', 'pending', { timeout: 180_000 });
     const canvas = page.locator('.viewer-canvas');
     const box = (await canvas.boundingBox())!;
-    const cx = box.x + box.width / 2;
-    const cy = box.y + box.height / 2;
+    // Pressed off the middle: the orbit turns about the middle all the same.
+    const cx = box.x + box.width * 0.3;
+    const cy = box.y + box.height * 0.6;
     const drag = async (key: 'Control' | 'Shift', kind: 'orbit' | 'pan') => {
       await page.mouse.move(5, 5);
       await page.waitForTimeout(300);
@@ -271,6 +272,11 @@ test.describe('with a sample model', () => {
       await page.mouse.down();
       await page.mouse.move(cx + 120, cy + 40, { steps: 8 });
       await expect(canvas).toHaveAttribute('data-dragging', kind);
+      if (kind === 'orbit') {
+        const pivot = (await page.locator('.orbit-pivot').boundingBox())!;
+        expect(Math.abs(pivot.x + pivot.width / 2 - (box.x + box.width / 2)), 'pivot in the middle (x)').toBeLessThan(4);
+        expect(Math.abs(pivot.y + pivot.height / 2 - (box.y + box.height / 2)), 'pivot in the middle (y)').toBeLessThan(4);
+      }
       await page.mouse.up();
       await page.keyboard.up(key);
       await expect(canvas).not.toHaveAttribute('data-dragging', kind);
