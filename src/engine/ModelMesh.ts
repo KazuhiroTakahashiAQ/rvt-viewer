@@ -18,8 +18,8 @@ import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
 import type { MaterialRun } from '../wasm/types';
 import type { RefinePatch } from '../worker/protocol';
 import { EntityState } from './EntityState';
-import { InstanceGroup, type InstanceHit, type InstancePart } from './InstanceGroup';
-import { type SharedUniforms, createEdgeMaterial, createFaceMaterial, passVisible } from './modelMaterials';
+import { type EntityDraw, InstanceGroup, type InstanceHit, type InstancePart } from './InstanceGroup';
+import { EDGE_LAYER, type SharedUniforms, blendedPass, createEdgeMaterial, createFaceMaterial, passVisible } from './modelMaterials';
 
 const EDGE_THRESHOLD_DEG = 25;
 
@@ -427,6 +427,7 @@ export class ModelMesh {
     const lines = new THREE.LineSegments(geometry, material);
     lines.matrixAutoUpdate = false;
     lines.renderOrder = 2;
+    lines.layers.set(EDGE_LAYER);
     lines.raycast = () => {};
     this.disposables.push(geometry, material);
     this.root.add(lines);
@@ -740,6 +741,7 @@ export class ModelMesh {
       const lines = new THREE.LineSegments(geometry, material);
       lines.matrixAutoUpdate = false;
       lines.renderOrder = 2;
+      lines.layers.set(EDGE_LAYER);
       lines.raycast = () => {};
       chunk.disposables.push(geometry, material);
       chunk.edges = { geometry, lines, items };
@@ -769,6 +771,80 @@ export class ModelMesh {
       const mesh = obj as THREE.Mesh;
       if (mesh.isMesh && !Array.isArray(mesh.material)) mesh.visible = passVisible(mesh.material, this.opacityOverrides);
     });
+  }
+
+  /** Some element has an opacity override, so every batch's transparent pass is drawn. */
+  get hasOpacityOverrides(): boolean {
+    return this.opacityOverrides;
+  }
+
+  /** Edge segments drawn a frame, collapsed ones included (they cost the GPU all the same). */
+  get edgeSegments(): number {
+    let segments = 0;
+    this.root.traverse((obj) => {
+      const lines = obj as THREE.LineSegments;
+      if (!lines.isLineSegments) return;
+      const geometry = lines.geometry as THREE.InstancedBufferGeometry;
+      const each = geometry.getAttribute('position').count / 2;
+      segments += geometry.isInstancedBufferGeometry ? each * geometry.instanceCount : each;
+    });
+    return segments;
+  }
+
+  /**
+   * Copies of `entity`'s triangles and edges, drawn as its own meshes draw
+   * them (their materials and, instanced, its matrix): drawn again over the
+   * frame, they come out at the same depths and so replace its pixels only.
+   * Not its transparent pass, which draws nothing without opacity
+   * overrides but where it is transparent (`transparent` then).
+   */
+  drawOf(entity: number): EntityDraw {
+    const draw: EntityDraw = { faces: [], edges: [], transparent: false, disposables: [] };
+    const spans = this.spans.get(entity) ?? [];
+    if (spans.length > 0) {
+      // The merged meshes and lines drawing each buffer.
+      const drawers = new Map<THREE.BufferAttribute, (THREE.Mesh | THREE.LineSegments)[]>();
+      this.root.traverse((obj) => {
+        const o = obj as THREE.Mesh | THREE.LineSegments;
+        if (!(o as THREE.Mesh).isMesh && !(o as THREE.LineSegments).isLineSegments) return;
+        if ((o as THREE.InstancedMesh).isInstancedMesh || (o.geometry as THREE.InstancedBufferGeometry).isInstancedBufferGeometry) return;
+        const position = o.geometry.getAttribute('position') as THREE.BufferAttribute;
+        const list = drawers.get(position);
+        if (list) list.push(o);
+        else drawers.set(position, [o]);
+      });
+      for (const span of spans) {
+        const objects = drawers.get(span.attribute);
+        if (!objects) continue;
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute((span.attribute.array as Float32Array).slice(span.start * 3, (span.start + span.count) * 3), 3));
+        geometry.setAttribute('aEntity', new THREE.BufferAttribute(new Float32Array(span.count).fill(entity), 1));
+        draw.disposables.push(geometry);
+        const first = objects[0]!;
+        if ((first as THREE.LineSegments).isLineSegments) {
+          draw.edges.push(drawCopy(new THREE.LineSegments(geometry, first.material), first));
+          continue;
+        }
+        const index = first.geometry.index!.array as Uint32Array;
+        const item = span.item as Partial<ChunkItem> | null;
+        // A chunk's index keeps each part together; the first build's is
+        // reordered by its bounds tree.
+        const local =
+          item?.indexStart !== undefined && item.indexCount !== undefined
+            ? index.slice(item.indexStart, item.indexStart + item.indexCount).map((v) => v - span.start)
+            : trianglesIn(index, span.start, span.count);
+        geometry.setIndex(new THREE.BufferAttribute(local, 1));
+        for (const o of objects) {
+          if (!o.visible) continue;
+          const material = o.material as THREE.Material;
+          if (material.userData.rvtPass === 1) draw.transparent ||= blendedPass(material);
+          else draw.faces.push(drawCopy(new THREE.Mesh(geometry, material), o));
+        }
+      }
+    }
+    const slot = this.slots.get(entity);
+    if (slot) slot.group.drawOf(slot.slot, draw);
+    return draw;
   }
 
   /** Entities with a body, i.e. anything that can be drawn or picked. */
@@ -902,6 +978,37 @@ export function splitRuns(
     start += run.triangles;
   }
   return result;
+}
+
+/** `copy` drawn as `source` is, for `drawOf`. */
+function drawCopy<T extends THREE.Object3D>(copy: T, source: THREE.Object3D): T {
+  copy.matrixAutoUpdate = false;
+  copy.renderOrder = source.renderOrder;
+  copy.frustumCulled = false;
+  return copy;
+}
+
+/**
+ * The triangles of `index` on vertices `start`..`start + count` (one
+ * entity's, which no other triangle uses), in order and renumbered from 0.
+ */
+export function trianglesIn(index: ArrayLike<number>, start: number, count: number): Uint32Array {
+  const end = start + count;
+  let n = 0;
+  for (let i = 0; i < index.length; i += 3) {
+    const a = index[i]!;
+    if (a >= start && a < end) n += 3;
+  }
+  const out = new Uint32Array(n);
+  let o = 0;
+  for (let i = 0; i < index.length && o < n; i += 3) {
+    const a = index[i]!;
+    if (a < start || a >= end) continue;
+    out[o++] = a - start;
+    out[o++] = index[i + 1]! - start;
+    out[o++] = index[i + 2]! - start;
+  }
+  return out;
 }
 
 function lookKey(look: Look): string {

@@ -7,7 +7,7 @@
 
 import * as THREE from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
-import { type SharedUniforms, createEdgeMaterial, createFaceMaterial } from './modelMaterials';
+import { EDGE_LAYER, type SharedUniforms, blendedPass, createEdgeMaterial, createFaceMaterial } from './modelMaterials';
 
 /** A part of the shape in one colour and opacity (a run of its materials). */
 export interface InstancePart {
@@ -15,6 +15,16 @@ export interface InstancePart {
   indices: Uint32Array;
   color: THREE.Color;
   opacity: number;
+}
+
+/** Copies drawing one entity alone ([`ModelMesh.drawOf`]). */
+export interface EntityDraw {
+  faces: THREE.Object3D[];
+  edges: THREE.Object3D[];
+  /** Some of it is drawn in the transparent pass (blended, so it cannot be drawn over itself). */
+  transparent: boolean;
+  /** The copies' own buffers. */
+  disposables: { dispose(): void }[];
 }
 
 export interface InstanceHit {
@@ -117,6 +127,52 @@ export class InstanceGroup {
     }
   }
 
+  /** Add copies drawing the body in `slot` alone, with this group's materials and its matrix, to `draw`. */
+  drawOf(slot: number, draw: EntityDraw): void {
+    const entity = this.entities[slot]!;
+    if (entity < 0) return;
+    const matrix = new THREE.InstancedBufferAttribute((this.matrix.array as Float32Array).slice(slot * 16, slot * 16 + 16), 16);
+    const ids = new THREE.InstancedBufferAttribute(new Float32Array([entity]), 1);
+    const copies = new Map<THREE.BufferGeometry, THREE.BufferGeometry>();
+    for (const mesh of this.meshes) {
+      if (!mesh.visible) continue;
+      const material = mesh.material as THREE.Material;
+      if (material.userData.rvtPass === 1) {
+        draw.transparent ||= blendedPass(material);
+        continue;
+      }
+      let geometry = copies.get(mesh.geometry);
+      if (!geometry) {
+        geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(mesh.geometry.getAttribute('position').array, 3));
+        geometry.setIndex(new THREE.BufferAttribute(mesh.geometry.index!.array, 1));
+        geometry.setAttribute('aEntity', ids);
+        copies.set(mesh.geometry, geometry);
+        draw.disposables.push(geometry);
+      }
+      const copy = new THREE.InstancedMesh(geometry, material, 1);
+      copy.instanceMatrix = matrix;
+      copy.matrixAutoUpdate = false;
+      copy.renderOrder = mesh.renderOrder;
+      copy.frustumCulled = false;
+      draw.faces.push(copy);
+      draw.disposables.push(copy);
+    }
+    if (this.lines && this.edgePositions) {
+      const geometry = new THREE.InstancedBufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(this.edgePositions.array, 3));
+      geometry.setAttribute('instanceMatrix', matrix);
+      geometry.setAttribute('aEntity', ids);
+      geometry.instanceCount = 1;
+      const lines = new THREE.LineSegments(geometry, this.lines.material);
+      lines.matrixAutoUpdate = false;
+      lines.renderOrder = this.lines.renderOrder;
+      lines.frustumCulled = false;
+      draw.edges.push(lines);
+      draw.disposables.push(geometry);
+    }
+  }
+
   dispose(): void {
     for (const mesh of this.meshes) mesh.dispose();
     this.lines?.geometry.dispose();
@@ -192,6 +248,7 @@ export class InstanceGroup {
       const lines = new THREE.LineSegments(geometry, material);
       lines.matrixAutoUpdate = false;
       lines.renderOrder = 2;
+      lines.layers.set(EDGE_LAYER);
       lines.frustumCulled = false;
       lines.raycast = () => {};
       this.materials.push(material);
