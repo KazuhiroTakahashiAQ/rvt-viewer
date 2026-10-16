@@ -1,6 +1,6 @@
 # 解析でわかった事実
 
-本アプリの開発中に、rvt-rs（本家のコミット `120e2f9`、および修正を重ねた fork のコミット `8834002`）を使って Revit ファイルを解析して確認した事実です。フィールド名は rvt-rs がファイル内のスキーマから読み出した名前です。数値は [確認に使ったファイル](README.md#確認に使ったファイル) での実測値です。推測を含むものは「推測」と明記しています。
+本アプリの開発中に、rvt-rs（本家のコミット `120e2f9`、および修正を重ねた fork のコミット `929970e`）を使って Revit ファイルを解析して確認した事実です。フィールド名は rvt-rs がファイル内のスキーマから読み出した名前です。数値は [確認に使ったファイル](README.md#確認に使ったファイル) での実測値です。推測を含むものは「推測」と明記しています。
 
 ## ファミリの定義は .rvt に含まれる
 
@@ -162,7 +162,7 @@ WebAssembly（wasm32）では `usize` が 32 bit のため、ファイル内の 
 
 ## fork での rvt-rs の修正
 
-本家 rvt-rs（`120e2f9`）に、次の修正を重ねた fork（[KazuhiroTakahashiAQ/rvt-rs](https://github.com/KazuhiroTakahashiAQ/rvt-rs) の `rvt-viewer` ブランチ、コミット `8834002`）を使っています。
+本家 rvt-rs（`120e2f9`）に、次の修正を重ねた fork（[KazuhiroTakahashiAQ/rvt-rs](https://github.com/KazuhiroTakahashiAQ/rvt-rs) の `rvt-viewer` ブランチ、コミット `929970e`）を使っています。
 
 - `elem_table::detect_layout`: ID 1 と ID 2 のどちらかが全体で昇順なら、その形式を採用する。利用者提供の Revit 2026 プロジェクトは要素 0 件から 7,922 件（レベル 30）になり、rvt-rs の信頼度は最高（`geometry`、未出力 0 件）になった。他の確認用ファイルの要素数は変わらない。
 - `partition_room_parameters::data_objects`: 末尾位置の計算を飽和加算にする。
@@ -177,6 +177,28 @@ WebAssembly（wasm32）では `usize` が 32 bit のため、ファイル内の 
 - `OpenLimits::max_inflated_partition_bytes`（追加、既定 1 GiB）: 1 つのパーティションの展開後の上限。以前は 1 GiB に固定されていた。超えた分は読まず、`RevitFile::partition_issues`（追加）に記録する。上限を超えて読まなかったストリームも記録する（以前はエラーが捨てられ、理由がわからなかった）。
 - `partition_schema_mvp`: パーティションを大きい順に並べるために、各ストリームを丸ごと読んで長さを数えていた。ディレクトリにある格納サイズを使うようにした（上限を超えるストリームは並びから落ちていた）。
 - `native_index::storage_increments`: 保存の履歴（`Global/DocumentIncrementTable`）を読むときの値の数の上限（既定 10 万）を、ストリームの長さまで広げる。1,448 回保存された共有モデルは上限を超え、ネイティブの要素抽出（保存済みメッシュ、MEP のコネクタなど）がすべて失敗していた。このプロジェクトでは、接続口（`Port`）が 21,982 から 40,861、接続（`PortConnection`）が 0 から 9,861 になった。確認した 9 ファイルの出力は変わらない。
+- `partition_room_parameters`: 通し番号・整数パラメータ・パラメータ定義の読み取り（`scan_text_parameter`、`scan_integer_parameter`、`find_parameter_definitions`）は、目印が見つかるたびに `enclosing_data_object` で最大 200 KB さかのぼり、候補ごとにペイロード全体の Adler-32 を計算し直していた。1 回の走査で作るデータ オブジェクトの一覧（`RevitFile::partition_data_objects`、結果を保持）から同じ答えを求める `EnclosingDataObjects` に置き換えた（[要素の解析で時間を使っていた処理](#要素の解析で時間を使っていた処理)）。あわせて、範囲の Adler-32 を 64 KiB ごとの累積値から求める `Adler32Ranges` を加えた（サイズ欄が数百 MB 先を指す、もっともらしいが誤ったヘッダーが多く、その検査だけで 1.2 GB のプロジェクトでは延べ 37 GB を計算していた）。
+- `elem_table::parse_records`・`partition_materials::scan_material_names`・`partition_type_materials::type_material_names`: 1 回の書き出しの中で、それぞれ 10 回以上・4 回・2 回計算していた。初回の結果を `RevitFile` に保持し、`release_export_caches` で捨てる。
+- この 2 つで、要素の解析（ネイティブ）は 1.2 GB のプロジェクトで約 33 秒から約 19.5 秒、158 MB のプロジェクトで 7.6 秒から 5.7 秒、Snowdon Towers で 5.9 秒から 4.6 秒になった。確認した 10 ファイルの出力（モデルの JSON）は、要素数・SHA-256 とも変更前と一致する。
+
+## 要素の解析で時間を使っていた処理
+
+利用者提供の Revit 2024 プロジェクト（1.2 GB）の要素の解析（ネイティブ実行、書き出し約 28 秒）をサンプリングした結果（上記の修正の前）:
+
+- `attach_serial_numbers` が約 33%（約 9.3 秒）で、ほぼすべてが `simd_adler32`。通し番号などのパラメータを要素に結び付けるとき、目印のたびにデータ オブジェクトをさかのぼって探し、Adler-32 を計算し直していた（fork で修正）。
+- `native_document::extract_records_with`（グラフの復号）約 19%、`attach_connector_pairs` 約 9%、`unset_material_types` 約 8% と `type_material_names` 約 6%、パーティションの展開 約 7%。ほかは各 2 〜 3%。
+- 同じ計算の繰り返し（`type_material_names` 2 回、`scan_material_names` 4 回、`parse_records` 10 回以上）が合わせて約 1.7 秒（約 6%）（fork で修正）。
+- ブラウザでは、最初の表示までの 62.8 秒のうち 61.9 秒がこの解析（`openDocument`）で、ほかの工程は合わせて 1 秒未満だった。
+
+## 描画の負荷
+
+利用者提供の Revit 2024 プロジェクト（1.2 GB）で保存済みメッシュをすべて描いたあとの 1 フレーム（Chromium、Apple M3）:
+
+- 描画の呼び出し 543 回、三角形 約 2,640 万、稜線 約 1,050 万本。GPU の時間（`EXT_disjoint_timer_query_webgl2`）は 1 フレーム 45 〜 60 ms（面 約 24 ms、稜線 約 23 ms）で、ページ側（CPU）の描画処理は 2 〜 7 ms。読み込み中に 100 ms を超えて止まったフレームの多くは、その間メインスレッドがほぼ待機しており、GPU を待っていた。
+- 三角形（ネイティブで数えて約 2,485 万）のうち、配管継手 7,963 要素が約 1,344 万（54%、1 要素あたり約 1,700）。続いて配管 約 320 万、ダクト継手 約 292 万、衛生器具 約 285 万。rvt-rs が読んだ保存データの三角形が約 1,494 万、ビューアが曲面を分割した三角形が約 992 万。
+- 曲面の分割を粗くする（弦の許容値を 2 倍）と約 1,948 万（−22%）。詳細レベルを「中」にすると約 1,117 万になるが、配管継手の保存済みメッシュがなくなり、置き換えられる要素が 22,651 から 14,513 に減る。
+- 稜線 約 980 万本のうち、配管継手が約 536 万本（1 要素あたり約 670 本）。全体を表示すると、稜線でモデルがほぼ黒く見える密度になる。
+- Snowdon Towers（稜線 約 420 万本）では、1 フレームの GPU の時間が約 29 ms（稜線が約 13 ms）。視点を動かし続けると GPU の処理が追いつかず、操作から表示まで 0.25 秒前後遅れていた（垂直同期を切って計測）。
 
 ## WebAssembly で解析が遅かった理由
 

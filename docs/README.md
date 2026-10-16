@@ -5,7 +5,7 @@ RVT ビューアの対応範囲、既知の問題、Revit ファイルの解析�
 - [既知の問題](known-issues.md)
 - [解析でわかった事実](findings.md)
 
-記載内容は、2026-10-16 時点の公開版と、使っている rvt-rs の fork（[KazuhiroTakahashiAQ/rvt-rs](https://github.com/KazuhiroTakahashiAQ/rvt-rs) のコミット `8834002`、本家 `120e2f9` に修正を重ねたもの。開発時は `../rvt-rs`）で確認したものです。件数や時間は、下記「確認に使ったファイル」で実測した値です。
+記載内容は、2026-10-16 時点の公開版と、使っている rvt-rs の fork（[KazuhiroTakahashiAQ/rvt-rs](https://github.com/KazuhiroTakahashiAQ/rvt-rs) のコミット `929970e`、本家 `120e2f9` に修正を重ねたもの。開発時は `../rvt-rs`）で確認したものです。件数や時間は、下記「確認に使ったファイル」で実測した値です。
 
 ## 対応バージョン
 
