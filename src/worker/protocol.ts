@@ -14,7 +14,8 @@ export type ExportKind = 'ifc' | 'glb' | 'plan-svg' | 'csv-elements' | 'csv-room
 export type LoadStep = 'init' | 'metadata' | 'parse' | 'scene' | 'geometry' | 'schedule';
 
 export type ToWorker =
-  | { type: 'open'; bytes: Uint8Array; savedMeshes: boolean }
+  /** The file is read in slices in the worker, not copied whole. */
+  | { type: 'open'; file: File; savedMeshes: boolean }
   /** Start the saved-mesh pass: the page has drawn the first geometry. */
   | { type: 'refine-begin' }
   /**
@@ -39,6 +40,8 @@ export interface ReadyPayload {
   types: string[];
   glb: Uint8Array;
   schedule: Schedule;
+  /** Partitions rvt-rs read short or not at all: `[stream, why]`. */
+  issues: [string, string][];
 }
 
 /** What rvt-rs did when drawing bounding-box bodies from Revit's saved display meshes. */

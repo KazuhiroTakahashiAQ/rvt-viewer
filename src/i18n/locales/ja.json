@@ -496,6 +496,7 @@
     "opening": "{{name}} を開いています...",
     "version": "Revit {{version}} のファイル",
     "elapsed": "経過時間 {{seconds}} 秒",
+    "partialPartitions": "ファイルが大きいため、要素のデータ（{{streams}}）の一部または全部を読み込めませんでした。要素が欠けて表示されることがあります。",
     "step": {
       "init": "読込エンジンを初期化",
       "metadata": "ファイル情報を読み込み",

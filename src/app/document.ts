@@ -54,9 +54,8 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
   let summary: Summary | null = null;
   let metadata: FileMetadata | null = null;
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
     const savedMeshes = store.prefs.savedMeshes;
-    const ready = await client.open(bytes, {
+    const ready = await client.open(file, {
       savedMeshes,
       onRefineProgress: (stage, done, total) => {
         if (seq === openSeq) useStore.getState().setWork({ stage, done, total });
@@ -96,6 +95,11 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
       hasGeometry,
       savedMeshes: { status: savedMeshes ? 'pending' : 'off', report: null },
     });
+    // rvt-rs goes on without a partition it could not read in full.
+    if (ready.issues.length > 0) {
+      const streams = ready.issues.map(([stream]) => stream).join(', ');
+      useStore.getState().pushToast('error', i18n.t('loading.partialPartitions', { streams }));
+    }
     // Without geometry no view draws a first model to wait for.
     if (!hasGeometry) requestSavedMeshes();
   } catch (err) {

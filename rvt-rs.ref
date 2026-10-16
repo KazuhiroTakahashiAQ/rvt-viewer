@@ -2,4 +2,4 @@
 # fixes the viewer needs, checked out beside this repository as ../rvt-rs.
 # scripts/build-wasm.sh and CI read these two lines.
 repository=KazuhiroTakahashiAQ/rvt-rs
-commit=4f50d6c74fb42fedfae27eb6ae4649d71e1ab6f7
+commit=8834002c618b1f012d1859cc22839eefb0f98239

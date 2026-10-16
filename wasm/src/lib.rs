@@ -1,8 +1,10 @@
 //! WebAssembly bindings of rvt-rs for rvt-viewer.
 //!
 //! The viewer opens one document per worker ([`open_document`]) and keeps
-//! it here: the file's bytes and the decoded model stay in wasm memory, and
-//! every later call works on them. Only what the page needs crosses into
+//! it here: the decoded model stays in wasm memory, and every later call
+//! works on it. The file is not copied in: rvt-rs reads the browser `File`
+//! in slices as it needs them ([`BrowserFile`]), and keeps only the
+//! project's own part of each partition. Only what the page needs crosses into
 //! JavaScript: the model without its bodies, which the GLB carries
 //! ([`page_model`]). A model with millions of saved-mesh triangles would
 //! otherwise be a JavaScript object of gigabytes, copied in and out of wasm
@@ -25,6 +27,7 @@ use rvt::ifc::{
 };
 use serde::Serialize;
 use std::cell::RefCell;
+use std::io::{Read, Seek, SeekFrom};
 use wasm_bindgen::prelude::*;
 
 mod brep;
@@ -66,6 +69,102 @@ fn object(entries: &[(&str, &JsValue)]) -> Result<JsValue, JsValue> {
         js_sys::Reflect::set(&out, &JsValue::from_str(key), value)?;
     }
     Ok(out.into())
+}
+
+/// A browser `File` read in slices with `FileReaderSync` (in a worker), a
+/// block at a time: rvt-rs reads the compound file's sectors as it needs
+/// them, mostly in order.
+struct BrowserFile {
+    file: web_sys::Blob,
+    reader: web_sys::FileReaderSync,
+    len: u64,
+    pos: u64,
+    block_start: u64,
+    block: Vec<u8>,
+}
+
+/// Bytes read from the `File` at a time.
+const FILE_BLOCK: u64 = 4 << 20;
+
+impl BrowserFile {
+    fn new(file: &web_sys::File) -> Result<Self, JsValue> {
+        Ok(Self {
+            file: file.clone().into(),
+            reader: web_sys::FileReaderSync::new()?,
+            len: file.size() as u64,
+            pos: 0,
+            block_start: 0,
+            block: Vec::new(),
+        })
+    }
+
+    fn load_block(&mut self, start: u64) -> std::io::Result<()> {
+        let io = |e: JsValue| std::io::Error::other(format!("{e:?}"));
+        let end = (start + FILE_BLOCK).min(self.len);
+        let slice = self
+            .file
+            .slice_with_f64_and_f64(start as f64, end as f64)
+            .map_err(io)?;
+        let buffer = self.reader.read_as_array_buffer(&slice).map_err(io)?;
+        let array = js_sys::Uint8Array::new(&buffer);
+        self.block.resize(array.length() as usize, 0);
+        array.copy_to(&mut self.block);
+        self.block_start = start;
+        Ok(())
+    }
+}
+
+impl Read for BrowserFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.len || buf.is_empty() {
+            return Ok(0);
+        }
+        let in_block = self.pos >= self.block_start
+            && self.pos < self.block_start + self.block.len() as u64;
+        if !in_block {
+            self.load_block(self.pos / FILE_BLOCK * FILE_BLOCK)?;
+        }
+        let at = (self.pos - self.block_start) as usize;
+        let n = buf.len().min(self.block.len() - at);
+        buf[..n].copy_from_slice(&self.block[at..at + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for BrowserFile {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        let pos = match to {
+            SeekFrom::Start(n) => Some(n),
+            SeekFrom::End(d) => self.len.checked_add_signed(d),
+            SeekFrom::Current(d) => self.pos.checked_add_signed(d),
+        };
+        self.pos = pos.ok_or_else(|| std::io::Error::other("seek before the start of the file"))?;
+        Ok(self.pos)
+    }
+}
+
+// SAFETY: the module runs on the worker's one thread (wasm32 without
+// threads), so a `BrowserFile` is never sent to or shared with another;
+// rvt-rs only asks for `Send + Sync` for its native callers.
+unsafe impl Send for BrowserFile {}
+unsafe impl Sync for BrowserFile {}
+
+/// The limits the viewer opens files with. The file itself is not held, so
+/// it may be larger than rvt-rs's default; what is held is the project's
+/// part of each partition (at most 1 GiB stored, 2 GiB inflated), within
+/// wasm32's 4 GiB.
+fn open_limits() -> rvt::reader::OpenLimits {
+    rvt::reader::OpenLimits {
+        max_file_bytes: 8 << 30,
+        max_stream_bytes: 1 << 30,
+        max_inflated_partition_bytes: 2 << 30,
+        ..Default::default()
+    }
+}
+
+fn open_file(file: &web_sys::File) -> Result<RevitFile, JsValue> {
+    RevitFile::open_source_with_limits(BrowserFile::new(file)?, open_limits()).map_err(err_str)
 }
 
 /// The open document: its model, and the file for the saved-mesh pass
@@ -117,14 +216,16 @@ fn page_model(model: &mut IfcModel) -> Result<JsValue, JsValue> {
 }
 
 /// Open a Revit file as the document, closing any other, and return
-/// `{ model, diagnostics }` with the page's [`page_model`]. `mode` is one
-/// of `scaffold`, `typed-no-geometry`, `geometry` or `strict`.
+/// `{ model, diagnostics, issues }` with the page's [`page_model`];
+/// `issues` are the partitions read short or not at all (`[stream, why]`,
+/// [`RevitFile::partition_issues`]). `mode` is one of `scaffold`,
+/// `typed-no-geometry`, `geometry` or `strict`.
 #[wasm_bindgen(js_name = openDocument)]
-pub fn open_document(bytes: Vec<u8>, mode: &str) -> Result<JsValue, JsValue> {
+pub fn open_document(file: &web_sys::File, mode: &str) -> Result<JsValue, JsValue> {
     install_panic_hook();
     close_document();
     let quality_mode = ExportQualityMode::parse(mode).map_err(err_str)?;
-    let mut rf = RevitFile::open_bytes(bytes).map_err(err_str)?;
+    let mut rf = open_file(file)?;
     let result = RvtDocExporter
         .export_with_diagnostics_mode_and_limits(
             &mut rf,
@@ -135,9 +236,15 @@ pub fn open_document(bytes: Vec<u8>, mode: &str) -> Result<JsValue, JsValue> {
     // The saved-mesh pass reads the inflated partitions again, nothing else.
     rf.release_export_caches();
     let mut model = result.model;
+    let issues: Vec<(String, String)> = rf
+        .partition_issues()
+        .iter()
+        .map(|(stream, why)| (stream.clone(), why.clone()))
+        .collect();
     let out = object(&[
         ("model", &page_model(&mut model)?),
         ("diagnostics", &to_js(&result.diagnostics)?),
+        ("issues", &to_js(&issues)?),
     ])?;
     DOCUMENT.with(|cell| {
         *cell.borrow_mut() = Some(Document {
@@ -368,18 +475,17 @@ pub fn document_refine_batch(entities: &[u32]) -> Result<JsValue, JsValue> {
 
 /// Cheap metadata (BasicFileInfo, PartAtom, stream inventory).
 #[wasm_bindgen(js_name = quickSummary)]
-pub fn quick_summary(bytes: &[u8]) -> Result<JsValue, JsValue> {
+pub fn quick_summary(file: &web_sys::File) -> Result<JsValue, JsValue> {
     install_panic_hook();
-    let mut rf = RevitFile::open_bytes(bytes.to_vec()).map_err(err_str)?;
+    let mut rf = open_file(file)?;
     let summary = rf.summarize_lossy().map_err(err_str)?.value;
     to_js(&summary)
 }
 
 /// Document identity: release, worksharing, last saved, GUID, ….
 #[wasm_bindgen(js_name = fileMetadata)]
-pub fn file_metadata(bytes: &[u8]) -> Result<JsValue, JsValue> {
+pub fn file_metadata(file: &web_sys::File) -> Result<JsValue, JsValue> {
     install_panic_hook();
-    let metadata =
-        rvt::metadata::read_metadata_from(std::io::Cursor::new(bytes)).map_err(err_str)?;
+    let metadata = rvt::metadata::read_metadata_from(BrowserFile::new(file)?).map_err(err_str)?;
     to_js(&metadata)
 }

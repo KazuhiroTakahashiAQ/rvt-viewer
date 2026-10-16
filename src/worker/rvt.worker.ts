@@ -3,10 +3,12 @@
  *
  * One worker per opened file: wasm32 linear memory never shrinks, so the
  * client terminates this worker and starts a fresh one for the next file.
- * The file's bytes and the decoded model live inside wasm (`openDocument`);
- * the page gets the model without its bodies and the GLB, and exports are
- * written from the model here. Nothing large is kept twice: the bytes are
- * dropped once wasm holds them, and the GLB is transferred, not copied.
+ * rvt-rs reads the file in slices (`FileReaderSync`) as it needs them,
+ * keeping the project's part of each partition, and the decoded model lives
+ * inside wasm (`openDocument`); the page gets the model without its bodies
+ * and the GLB, and exports are written from the model here. Nothing large
+ * is kept twice: the file is never read whole, and the GLB is transferred,
+ * not copied.
  *
  * The heavy steps run one at a time: the saved-mesh pass waits for the
  * page's `refine-begin`, sent once it has drawn the first geometry. It then
@@ -59,17 +61,21 @@ function tryOr<T>(fn: () => T, fallback: T): T {
   }
 }
 
-async function open(bytes: Uint8Array, savedMeshes: boolean): Promise<void> {
+async function open(file: File, savedMeshes: boolean): Promise<void> {
   send({ type: 'progress', step: 'init' });
   await init();
 
   send({ type: 'progress', step: 'metadata' });
-  const summary = tryOr(() => quickSummary(bytes) as Summary, null);
-  const metadata = tryOr(() => fileMetadata(bytes) as FileMetadata, null);
+  const summary = tryOr(() => quickSummary(file) as Summary, null);
+  const metadata = tryOr(() => fileMetadata(file) as FileMetadata, null);
   send({ type: 'summary', summary, metadata });
 
   send({ type: 'progress', step: 'parse' });
-  const result = openDocument(bytes, 'scaffold') as { model: IfcModel; diagnostics: ExportDiagnostics };
+  const result = openDocument(file, 'scaffold') as {
+    model: IfcModel;
+    diagnostics: ExportDiagnostics;
+    issues: [string, string][];
+  };
   opened = true;
 
   send({ type: 'progress', step: 'scene' });
@@ -82,9 +88,19 @@ async function open(bytes: Uint8Array, savedMeshes: boolean): Promise<void> {
   const schedule = documentSchedule() as Schedule;
 
   entityCount = result.model.entities.length;
-  send({ type: 'ready', model: result.model, diagnostics: result.diagnostics, scene, types, glb, schedule }, [
-    glb.buffer as ArrayBuffer,
-  ]);
+  send(
+    {
+      type: 'ready',
+      model: result.model,
+      diagnostics: result.diagnostics,
+      scene,
+      types,
+      glb,
+      schedule,
+      issues: result.issues,
+    },
+    [glb.buffer as ArrayBuffer],
+  );
   refineWanted = savedMeshes;
   // Nothing reads the file again.
   if (!savedMeshes) documentReleaseFile();
@@ -271,7 +287,7 @@ self.addEventListener('message', (ev: MessageEvent<ToWorker>) => {
   const msg = ev.data;
   switch (msg.type) {
     case 'open':
-      open(msg.bytes, msg.savedMeshes).catch((err: unknown) => send({ type: 'error', message: errorText(err) }));
+      open(msg.file, msg.savedMeshes).catch((err: unknown) => send({ type: 'error', message: errorText(err) }));
       return;
     case 'refine-begin':
       refineBegin();

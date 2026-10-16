@@ -25,7 +25,7 @@ export class RvtWorkerClient {
   private pending = new Map<number, (msg: FromWorker) => void>();
   private cancelOpen: ((err: Error) => void) | null = null;
 
-  open(bytes: Uint8Array, callbacks: OpenCallbacks): Promise<ReadyPayload> {
+  open(file: File, callbacks: OpenCallbacks): Promise<ReadyPayload> {
     this.close();
     const worker = new Worker(new URL('./rvt.worker.ts', import.meta.url), { type: 'module', name: 'rvt-parser' });
     this.worker = worker;
@@ -87,7 +87,7 @@ export class RvtWorkerClient {
           reject(new Error(ev.message || 'worker error'));
         }
       });
-      this.post({ type: 'open', bytes, savedMeshes: callbacks.savedMeshes }, [bytes.buffer as ArrayBuffer]);
+      this.post({ type: 'open', file, savedMeshes: callbacks.savedMeshes });
     });
   }
 
