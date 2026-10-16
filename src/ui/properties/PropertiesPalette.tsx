@@ -66,14 +66,14 @@ function ElementProperties() {
       else m.set(r.category, [e]);
     }
     return [...m.entries()].sort((a, b) => categoryRank(a[0]) - categoryRank(b[0]));
-  }, [doc, selection]);
+  }, [doc.index, selection]);
 
   const shown = filter ? (byCategory.find(([c]) => c === filter)?.[1] ?? selection) : selection;
   const groups: PropGroup[] = useMemo(() => {
     const ctx = { unit, locale: currentLocale(), t };
     const limited = shown.slice(0, 500);
     return mergeProperties(limited.map((e) => buildElementProperties(doc.index, doc.model, e, ctx)));
-  }, [doc, shown, unit, t, bodyRevision]);
+  }, [doc.index, doc.model, shown, unit, t, bodyRevision]);
 
   const records = shown.map((e) => doc.index.byIndex.get(e)).filter((r) => !!r);
   const first = records[0];

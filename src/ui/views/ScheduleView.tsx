@@ -93,7 +93,7 @@ export function ScheduleView({ kind }: { kind: ScheduleKind }) {
         };
       });
     return { columns, rows };
-  }, [doc, kind, t, unit, locale]);
+  }, [doc.index, doc.model, kind, t, unit, locale]);
 
   const sorted = useMemo(() => {
     const collator = new Intl.Collator(locale, { numeric: true, sensitivity: 'base' });

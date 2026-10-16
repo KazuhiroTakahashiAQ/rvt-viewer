@@ -1,4 +1,4 @@
-import type { FileMetadata, Summary } from '../wasm/types';
+import type { FileMetadata, IfcEntity, Summary } from '../wasm/types';
 import type { ExportKind, FromWorker, LoadStep, ReadyPayload, RefinePatch, RefineStage, ToWorker } from './protocol';
 
 export interface OpenCallbacks {
@@ -32,6 +32,7 @@ export class RvtWorkerClient {
 
     return new Promise<ReadyPayload>((resolve, reject) => {
       let settled = false;
+      const entities: IfcEntity[] = [];
       this.cancelOpen = (err) => {
         if (!settled) {
           settled = true;
@@ -47,9 +48,13 @@ export class RvtWorkerClient {
           case 'summary':
             callbacks.onSummary(msg.summary, msg.metadata);
             break;
+          case 'entities':
+            for (const entity of msg.entities) entities.push(entity);
+            break;
           case 'ready': {
             settled = true;
             const { type: _type, ...payload } = msg;
+            payload.model.entities = entities;
             resolve(payload);
             break;
           }

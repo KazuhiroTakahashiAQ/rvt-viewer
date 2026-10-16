@@ -32,14 +32,7 @@ import init, {
   openDocument,
   quickSummary,
 } from '../wasm/pkg/rvt.js';
-import type {
-  ExportDiagnostics,
-  FileMetadata,
-  IfcModel,
-  SceneNode,
-  Schedule,
-  Summary,
-} from '../wasm/types';
+import type { ExportDiagnostics, FileMetadata, IfcModel, Schedule, Summary } from '../wasm/types';
 import { type ExportKind, type FromWorker, type RefinePatch, type ToWorker, patchBuffers } from './protocol';
 
 let opened = false;
@@ -61,6 +54,9 @@ function tryOr<T>(fn: () => T, fallback: T): T {
   }
 }
 
+/** Entities a message ([`FromWorker`] `entities`): a few milliseconds' reading on the page. */
+const ENTITY_SLICE = 2000;
+
 async function open(file: File, savedMeshes: boolean): Promise<void> {
   send({ type: 'progress', step: 'init' });
   await init();
@@ -79,7 +75,8 @@ async function open(file: File, savedMeshes: boolean): Promise<void> {
   opened = true;
 
   send({ type: 'progress', step: 'scene' });
-  const { scene, types } = documentScene() as { scene: SceneNode; types: string[] };
+  // The page has no use for the scene graph: it is not sent.
+  documentScene();
 
   send({ type: 'progress', step: 'geometry' });
   const glb = documentGlb();
@@ -88,13 +85,13 @@ async function open(file: File, savedMeshes: boolean): Promise<void> {
   const schedule = documentSchedule() as Schedule;
 
   entityCount = result.model.entities.length;
+  const { entities, ...model } = result.model;
+  for (let i = 0; i < entities.length; i += ENTITY_SLICE) send({ type: 'entities', entities: entities.slice(i, i + ENTITY_SLICE) });
   send(
     {
       type: 'ready',
-      model: result.model,
+      model: { ...model, entities: [] },
       diagnostics: result.diagnostics,
-      scene,
-      types,
       glb,
       schedule,
       issues: result.issues,

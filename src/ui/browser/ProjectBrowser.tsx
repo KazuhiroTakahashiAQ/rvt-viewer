@@ -37,7 +37,9 @@ export function ProjectBrowser() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const tree = useMemo(() => (doc ? buildBrowserTree(views, doc.index, t) : []), [doc, views, t]);
+  // By the index, which stays as the document's state changes (the saved meshes drawn, say).
+  const index = doc?.index;
+  const tree = useMemo(() => (index ? buildBrowserTree(views, index, t) : []), [index, views, t]);
   const rows = useMemo(() => flattenTree(tree, expanded, filter), [tree, expanded, filter]);
   const viewKind = useMemo(() => new Map(views.map((v) => [v.id, v.kind])), [views]);
 

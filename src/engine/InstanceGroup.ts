@@ -2,11 +2,13 @@
  * The bodies of one saved-mesh shape in one look, drawn with GPU
  * instancing: the shape's triangles and edges once, a matrix and an entity
  * index per body. Picking tests each body's box, then the shape's bounds
- * tree in the body's frame.
+ * tree in the body's frame (a large shape's comes from a worker: its bodies
+ * are not picked for the few tens of milliseconds before).
  */
 
 import * as THREE from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
+import { buildBoundsTree } from './boundsTree';
 import { type SharedUniforms, createEdgeMaterial, createFaceMaterial } from './modelMaterials';
 
 /** A part of the shape in one colour and opacity (a run of its materials). */
@@ -39,7 +41,7 @@ export class InstanceGroup {
   private meshes: THREE.InstancedMesh[] = [];
   private lines: THREE.LineSegments | null = null;
   private readonly geometries: THREE.BufferGeometry[];
-  private readonly bvhs: MeshBVH[];
+  private readonly bvhs: (MeshBVH | null)[];
   private readonly edgePositions: THREE.BufferAttribute | null;
   private readonly materials: THREE.Material[] = [];
 
@@ -56,7 +58,20 @@ export class InstanceGroup {
       g.computeBoundingBox();
       return g;
     });
-    this.bvhs = this.geometries.map((g) => new MeshBVH(g));
+    // Drawn at once: copies go to the worker.
+    this.bvhs = this.geometries.map(() => null);
+    for (const [i, g] of this.geometries.entries()) {
+      const tree = buildBoundsTree(g, { indirect: false, lend: false });
+      if (tree instanceof MeshBVH) this.bvhs[i] = tree;
+      else {
+        void tree.then(
+          (t) => {
+            this.bvhs[i] = t;
+          },
+          () => {},
+        );
+      }
+    }
     this.edgePositions = edges.length > 0 ? new THREE.BufferAttribute(edges, 3) : null;
     this.root.name = 'rvt-instances';
     this.allocate(Math.max(1, capacity));
@@ -104,7 +119,7 @@ export class InstanceGroup {
       let best: THREE.Vector3 | null = null;
       let bestDistance = Infinity;
       for (const bvh of this.bvhs) {
-        const hit = bvh.raycastFirst(local, THREE.DoubleSide);
+        const hit = bvh?.raycastFirst(local, THREE.DoubleSide);
         if (!hit) continue;
         const point = hit.point.clone().applyMatrix4(m);
         const distance = ray.origin.distanceTo(point);

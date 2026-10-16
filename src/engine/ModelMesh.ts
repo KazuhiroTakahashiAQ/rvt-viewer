@@ -13,10 +13,11 @@
  */
 
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { GLTFLoader, type GLTFLoaderPlugin, type GLTFParser } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
 import type { MaterialRun } from '../wasm/types';
 import type { RefinePatch } from '../worker/protocol';
+import { buildBoundsTree } from './boundsTree';
 import { EntityState } from './EntityState';
 import { InstanceGroup, type InstanceHit, type InstancePart } from './InstanceGroup';
 import { type SharedUniforms, createEdgeMaterial, createFaceMaterial, passVisible } from './modelMaterials';
@@ -131,14 +132,15 @@ interface Batch {
 
 /**
  * Triangles of one merged mesh, at most: a batch of one material is split
- * so that no single merge or BVH build blocks the page for long.
+ * so that no single merge blocks the page for long (the BVHs are built in
+ * a worker: [`buildBoundsTree`]).
  */
 const MAX_BATCH_TRIANGLES = 400_000;
 
 /**
  * The same for the saved-mesh patches, which come while the user looks
- * around: a BVH takes about 0.25 ms a thousand triangles to build, in one
- * go, so about 30 ms.
+ * around: a BVH takes about 0.25 ms a thousand triangles to build, so a
+ * chunk waits about 30 ms for the worker's before it shows.
  */
 const MAX_PATCH_TRIANGLES = 120_000;
 
@@ -169,6 +171,29 @@ class Slicer {
     await this.gate?.();
     this.last = performance.now();
   }
+}
+
+/** Parse work between yields to the browser, ms: the nodes' later steps come on top. */
+const PARSE_SLICE_MS = 4;
+
+/**
+ * A GLTFLoader plugin loading the nodes a slice at a time: once the parse
+ * has run for [`PARSE_SLICE_MS`], the nodes asked for wait for the next
+ * task (all one, which slices them again). The loader's own steps all run
+ * in one go else, a large model's for a tenth of a second.
+ */
+function slicedNodes(parser: GLTFParser): GLTFLoaderPlugin {
+  let last = performance.now();
+  let next: Promise<void> | null = null;
+  const loadNode = (nodeIndex: number): Promise<THREE.Object3D> | null => {
+    if (performance.now() - last < PARSE_SLICE_MS) return null;
+    next ??= yieldToBrowser().then(() => {
+      next = null;
+      last = performance.now();
+    });
+    return next.then(() => loadNode(nodeIndex) ?? parser.loadNode(nodeIndex));
+  };
+  return { name: 'rvt_sliced_nodes', loadNode };
 }
 
 function triangleCount(geometry: THREE.BufferGeometry): number {
@@ -232,7 +257,9 @@ export class ModelMesh {
       glb.byteOffset === 0 && glb.byteLength === glb.buffer.byteLength
         ? (glb.buffer as ArrayBuffer)
         : (glb.buffer.slice(glb.byteOffset, glb.byteOffset + glb.byteLength) as ArrayBuffer);
-    const gltf = await new GLTFLoader().parseAsync(buffer, '');
+    // Not in the task that asked (the page's first render, for one).
+    await yieldToBrowser();
+    const gltf = await new GLTFLoader().register(slicedNodes).parseAsync(buffer, '');
     gltf.scene.updateMatrixWorld(true);
     try {
       await model.build(gltf.scene, uniforms, onProgress);
@@ -302,8 +329,9 @@ export class ModelMesh {
     const totalItems = Math.max(1, all.reduce((n, b) => n + b.items.length, 0));
     let merged = 0;
     const volumeCache = new Map<string, number>();
+    const trees: Promise<void>[] = [];
     for (const batch of all) {
-      await this.buildBatch(batch, uniforms, volumeCache, async (items) => {
+      await this.buildBatch(batch, uniforms, volumeCache, trees, async (items) => {
         await slicer.at(0.5 + (0.48 * (merged + items)) / totalItems);
       });
       merged += batch.items.length;
@@ -312,6 +340,8 @@ export class ModelMesh {
     this.buildEdges(edgeChunks, uniforms);
     for (const front of fronts) front.dispose();
     this.updatePasses();
+    // The batches lent their buffers to the worker: drawn once back.
+    await Promise.all(trees);
     onProgress?.(1);
   }
 
@@ -319,6 +349,7 @@ export class ModelMesh {
     batch: Batch,
     uniforms: SharedUniforms,
     volumeCache: Map<string, number>,
+    trees: Promise<void>[],
     progress: (items: number) => Promise<void>,
   ): Promise<void> {
     let vertexCount = 0;
@@ -375,7 +406,7 @@ export class ModelMesh {
     geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
-    geometry.boundsTree = new MeshBVH(geometry);
+    attachBoundsTree(geometry, false, trees);
     this.disposables.push(geometry);
     if (geometry.boundingBox) this.box.union(geometry.boundingBox);
     const position = geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -655,6 +686,7 @@ export class ModelMesh {
   /** Meshes for `parts`, one per look (split at MAX_PATCH_TRIANGLES), and one edge set. */
   private async buildChunk(parts: Part[], edges: PartEdges[], level: number, uniforms: SharedUniforms, slicer: Slicer): Promise<Chunk> {
     const chunk: Chunk = { level, groups: [], edges: null, disposables: [] };
+    const trees: Promise<void>[] = [];
     const byLook = new Map<string, Part[][]>();
     const sizes = new Map<Part[], number>();
     for (const part of parts) {
@@ -703,7 +735,7 @@ export class ModelMesh {
       geometry.computeBoundingSphere();
       await slicer.at();
       // Indirect: the index keeps its order, so that a merge can read each part back.
-      geometry.boundsTree = new MeshBVH(geometry, { indirect: true });
+      attachBoundsTree(geometry, true, trees);
       const look = list[0]!.look;
       const meshes = ([0, 1] as const).map((pass) => {
         const mesh = new THREE.Mesh(geometry, createFaceMaterial(uniforms, look.color, look.opacity, pass));
@@ -745,6 +777,8 @@ export class ModelMesh {
       chunk.edges = { geometry, lines, items };
       for (const item of items) this.addSpan(item.entity, { attribute: position, start: item.start, count: item.count, owner: chunk, item });
     }
+    // The meshes lent their buffers to the worker: shown once back.
+    await Promise.all(trees);
     return chunk;
   }
 
@@ -902,6 +936,26 @@ export function splitRuns(
     start += run.triangles;
   }
   return result;
+}
+
+/**
+ * Give `geometry`, not drawn yet, its BVH: at once where small, else once
+ * the worker sends it back (`trees` gets the wait) with the buffers it lent.
+ * Without one, picking it falls back to testing every triangle.
+ */
+function attachBoundsTree(geometry: THREE.BufferGeometry, indirect: boolean, trees: Promise<void>[]): void {
+  const tree = buildBoundsTree(geometry, { indirect, lend: true });
+  if (tree instanceof MeshBVH) geometry.boundsTree = tree;
+  else {
+    trees.push(
+      tree.then(
+        (t) => {
+          geometry.boundsTree = t;
+        },
+        () => {},
+      ),
+    );
+  }
 }
 
 function lookKey(look: Look): string {

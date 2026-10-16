@@ -78,9 +78,14 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
         if (seq === openSeq) useStore.getState().setLoadSummary(s);
       },
     });
+    // Each heavy step in a task of its own, for the page to draw between:
+    // reading the message, indexing the model, then the first render.
+    await nextTask();
+    if (seq !== openSeq) return;
+    const index = buildModelIndex(ready.model);
+    await nextTask();
     if (seq !== openSeq) return;
     const loading = useStore.getState().loading;
-    const index = buildModelIndex(ready.model);
     const hasGeometry = ready.diagnostics.exported.building_elements_with_geometry > 0;
     useStore.getState().documentLoaded({
       fileName: file.name,
@@ -108,6 +113,10 @@ export async function openFile(file: File, handle?: FileSystemFileHandle): Promi
     const detail = err instanceof Error ? err.message : String(err);
     useStore.getState().loadFailed(classifyError(detail, summary), detail);
   }
+}
+
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /** Changes with every document opened or closed, to tell late work apart. */

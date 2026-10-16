@@ -1,12 +1,4 @@
-import type {
-  BodyMaterials,
-  ExportDiagnostics,
-  FileMetadata,
-  IfcModel,
-  SceneNode,
-  Schedule,
-  Summary,
-} from '../wasm/types';
+import type { BodyMaterials, ExportDiagnostics, FileMetadata, IfcEntity, IfcModel, Schedule, Summary } from '../wasm/types';
 
 export type ExportKind = 'ifc' | 'glb' | 'plan-svg' | 'csv-elements' | 'csv-rooms';
 
@@ -36,8 +28,6 @@ export type RefineStage = 'materials' | 'meshes';
 export interface ReadyPayload {
   model: IfcModel;
   diagnostics: ExportDiagnostics;
-  scene: SceneNode;
-  types: string[];
   glb: Uint8Array;
   schedule: Schedule;
   /** Partitions rvt-rs read short or not at all: `[stream, why]`. */
@@ -91,6 +81,12 @@ export interface RefinePatch {
 export type FromWorker =
   | { type: 'progress'; step: LoadStep }
   | { type: 'summary'; summary: Summary | null; metadata: FileMetadata | null }
+  /**
+   * The model's entities, a slice at a time before `ready` (whose model
+   * comes without them): the page reads a message in one go, which for a
+   * large model's entities at once stops it for tens of milliseconds.
+   */
+  | { type: 'entities'; entities: IfcEntity[] }
   | ({ type: 'ready' } & ReadyPayload)
   | { type: 'refine-progress'; stage: RefineStage; done: number; total: number }
   /** The saved-mesh pass's candidates; empty when it has nothing to do. */

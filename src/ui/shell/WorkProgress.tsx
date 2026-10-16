@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { type WorkProgress, useStore } from '../../state/store';
 
@@ -17,11 +18,19 @@ export function workFraction(work: WorkProgress): number {
   }
 }
 
+/** One formatter for the counts, not one a call (`toLocaleString`). */
+const counts = new Intl.NumberFormat();
+
 /** The label of a work stage, with its counts where it has them. */
 export function useWorkLabel(work: WorkProgress | null): string {
   const { t } = useTranslation();
-  if (!work) return '';
-  return t(`work.${work.stage}`, { done: work.done.toLocaleString(), total: work.total.toLocaleString() });
+  const stage = work?.stage;
+  const done = work?.done ?? 0;
+  const total = work?.total ?? 0;
+  return useMemo(
+    () => (stage ? t(`work.${stage}`, { done: counts.format(done), total: counts.format(total) }) : ''),
+    [t, stage, done, total],
+  );
 }
 
 /** A progress bar for the current work, or nothing. */
