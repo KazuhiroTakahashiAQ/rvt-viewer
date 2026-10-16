@@ -17,7 +17,15 @@ import { pickPriority } from '../model/categories';
 import { CameraRig, type CameraPose, type Projection, anglesFromDirection, boxCorners, clonePose } from './CameraRig';
 import { FLAG_HALFTONE, FLAG_HOVER, FLAG_REVEALED, FLAG_SELECTED, FLAG_VISIBLE } from './EntityState';
 import { ModelMesh } from './ModelMesh';
-import { type SharedUniforms, createEdgeMaterial, createFaceMaterial, createSharedUniforms, setVisualStyle } from './modelMaterials';
+import {
+  EDGE_LAYER,
+  type SharedUniforms,
+  blendedPass,
+  createEdgeMaterial,
+  createFaceMaterial,
+  createSharedUniforms,
+  setVisualStyle,
+} from './modelMaterials';
 import { SectionBox } from './SectionBox';
 import { type DisplayConfig, type ModelViewConfig, type NavMode, type SectionBoxState, type ThemeConfig, UNASSIGNED_LEVEL } from './types';
 import { ViewCube, type ViewCubeLabels } from './ViewCube';
@@ -65,6 +73,21 @@ const VIEWCUBE_SIZE = 116;
 /** How far (world metres) the cut fill is pulled toward the viewer. */
 const CUT_BIAS_METRES = 0.002;
 
+/**
+ * A model with more edge segments than this is drawn without its edges
+ * while the camera moves. An M3 takes about 3 ms a million (Snowdon Towers'
+ * 4.2 million: 13 ms of a 29 ms frame), an integrated GPU several times as
+ * long: above this the edges alone outgrow a frame there. (The 20 MB
+ * samples have 0.4 million, the 33 MB MEP one 2.2 million.)
+ */
+const HEAVY_EDGE_SEGMENTS = 1_000_000;
+/** The camera must stay put this long before the edges are drawn again, ms. */
+const EDGE_SETTLE_MS = 200;
+/** Layer of the entities drawn again over the last frame when the hover changes. */
+const REDRAW_LAYER = 2;
+/** Layer of what is drawn over those again: the transparent pass and the section box. */
+const OVER_REDRAW_LAYER = 3;
+
 interface ViewMemory {
   pose: CameraPose;
   home: CameraPose;
@@ -111,6 +134,21 @@ export class Viewer {
   private lastMiddleDown = 0;
   private hoverQueued: { x: number; y: number } | null = null;
   private dirty = true;
+  /** The entity drawn hovered in the drawing buffer now. */
+  private drawnHover: number | null = null;
+  /** Whether the last frame was drawn with the edges. */
+  private drawnEdges = true;
+  /** The model has edges enough to leave them out while the camera moves. */
+  private heavyEdges = false;
+  /** When the camera last moved. */
+  private lastMove = -Infinity;
+  /**
+   * Whether the drawing buffer keeps the last frame, depth included (the
+   * hover is drawn over it): checked over two frames at the start.
+   */
+  private preserved: 'unknown' | 'probing' | 'yes' | 'no' = 'unknown';
+  private probe: { scene: THREE.Scene; camera: THREE.OrthographicCamera; near: THREE.Mesh; far: THREE.Mesh; dispose(): void } | null = null;
+  private readonly redraws = new THREE.Group();
   private frame = 0;
   private lastWheel = 0;
   /** When the user last moved the view. */
@@ -130,7 +168,9 @@ export class Viewer {
     labels: ViewCubeLabels,
     private readonly callbacks: ViewerCallbacks,
   ) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: false });
+    // The drawing buffer is kept from frame to frame (with a stencil): a
+    // hover change draws two entities again over it, not the whole frame.
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, stencil: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.localClippingEnabled = true;
     this.renderer.domElement.className = 'viewer-canvas';
@@ -148,7 +188,9 @@ export class Viewer {
     this.overlay.append(this.boxEl, this.pivotEl);
     container.appendChild(this.overlay);
 
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.sectionBox.root);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.sectionBox.root, this.redraws);
+    for (const light of [this.hemi, this.sun]) light.layers.enableAll();
+    this.sectionBox.root.traverse((obj) => obj.layers.enable(OVER_REDRAW_LAYER));
 
     this.viewCube = new ViewCube(VIEWCUBE_SIZE, labels, {
       onPickDirection: (dir) => this.lookFrom(dir),
@@ -251,6 +293,7 @@ export class Viewer {
     this.hover = null;
     if (model) {
       this.scene.add(model.root);
+      this.heavyEdges = model.edgeSegments > HEAVY_EDGE_SEGMENTS;
       this.uniforms.uRvtState.value = model.state.state;
       this.uniforms.uRvtOverride.value = model.state.override;
       const sphere = model.box.isEmpty() ? new THREE.Sphere(new THREE.Vector3(), 10) : model.box.getBoundingSphere(new THREE.Sphere());
@@ -299,6 +342,7 @@ export class Viewer {
       this.computePlanMask();
       if (this.display) this.applyDisplay(this.display);
     }
+    if (this.model) this.heavyEdges = this.model.edgeSegments > HEAVY_EDGE_SEGMENTS;
     this.requestRender();
   }
 
@@ -585,8 +629,8 @@ export class Viewer {
       if (entity !== null) model.state.setFlags(entity, model.state.flags(entity) | FLAG_HOVER);
       model.state.commit();
     }
+    // The loop draws the change: over the last frame where it can (`redrawHover`).
     this.hover = entity;
-    this.requestRender();
   }
 
   /** Entities currently drawn (visible and in the view range). */
@@ -737,7 +781,38 @@ export class Viewer {
       this.hoverQueued = null;
       this.updateHover(x, y);
     }
-    if (!this.dirty) return;
+    if (this.preserved === 'unknown' || this.preserved === 'probing') {
+      if (this.checkPreserved()) return;
+    }
+    const cam = this.rig.camera;
+    if (!cam.matrixWorld.equals(this.lastCamera) || !cam.projectionMatrix.equals(this.lastProjection)) {
+      this.lastCamera.copy(cam.matrixWorld);
+      this.lastProjection.copy(cam.projectionMatrix);
+      this.lastMove = now;
+      this.dirty = true;
+      this.viewChanged();
+    }
+    const edges = this.edgesShown(now);
+    // The camera has stopped: draw the edges left out while it moved.
+    if (edges && !this.drawnEdges) this.dirty = true;
+    if (this.dirty || (this.drawnHover !== this.hover && !this.redrawHover())) this.draw(edges);
+  };
+
+  /**
+   * Whether to draw the edges now: always but on a model with many
+   * (`heavyEdges`) while the camera moves and for a moment after, in the
+   * shaded styles. The hidden line and wireframe styles are drawn by their
+   * edges (white or no faces) and keep them; plans and elevations are hidden
+   * line at first.
+   */
+  private edgesShown(now: number): boolean {
+    const style = this.uniforms.uRvtStyle.value;
+    const shaded = style === 0 || style === 2;
+    return !this.heavyEdges || !shaded || now - this.lastMove >= EDGE_SETTLE_MS;
+  }
+
+  /** Draw the whole frame. */
+  private draw(edges: boolean): void {
     this.dirty = false;
     const cam = this.rig.camera;
     // Key light from the upper left of the viewer, so shading reads the same
@@ -748,14 +823,148 @@ export class Viewer {
     this.sun.target.updateMatrixWorld();
     this.sectionBox.updateScale(this.worldPerPixel());
     this.uniforms.uRvtCutBias.value = this.cutBias();
+    cam.layers.set(0);
+    if (edges) cam.layers.enable(EDGE_LAYER);
     this.renderer.render(this.scene, cam);
+    this.drawnEdges = edges;
+    this.drawnHover = this.hover;
     this.viewCube.sync(q);
-    if (!cam.matrixWorld.equals(this.lastCamera) || !cam.projectionMatrix.equals(this.lastProjection)) {
-      this.lastCamera.copy(cam.matrixWorld);
-      this.lastProjection.copy(cam.projectionMatrix);
-      this.viewChanged();
+  }
+
+  /**
+   * Draw the hover change over the last frame, which the drawing buffer
+   * keeps with its depth: the entity hovered before and the one hovered now,
+   * each with its own triangles and edges at the depths they were drawn at,
+   * so they replace their own pixels only (depth test less-or-equal). The
+   * stencil marks those pixels, and the transparent pass and the section box,
+   * drawn over them in the frame, are drawn there again. False where the
+   * whole frame must be drawn: before the drawing buffer is known to keep
+   * it, and for transparent entities (which blend with what they cover).
+   */
+  private redrawHover(): boolean {
+    const model = this.model;
+    if (!model || this.preserved !== 'yes' || model.hasOpacityOverrides) return false;
+    const entities = [this.drawnHover, this.hover].filter((e): e is number => e !== null);
+    const draws = entities.map((e) => model.drawOf(e));
+    const release = () => {
+      for (const d of draws) for (const x of d.disposables) x.dispose();
+    };
+    if (draws.some((d) => d.transparent)) {
+      release();
+      return false;
     }
-  };
+    const cam = this.rig.camera;
+    const redrawn = draws.flatMap((d) => (this.drawnEdges ? [...d.faces, ...d.edges] : d.faces));
+    for (const obj of redrawn) {
+      obj.layers.set(REDRAW_LAYER);
+      this.redraws.add(obj);
+    }
+    // Only where the two lie on screen: what is drawn over them there.
+    const rect = this.screenRect(entities);
+    const region = rect ? regionFrustum(cam, rect) : null;
+    const glass: THREE.Mesh[] = [];
+    model.root.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.visible || !blendedPass(mesh.material as THREE.Material)) return;
+      if (region && !region.intersectsObject(mesh)) return;
+      mesh.layers.enable(OVER_REDRAW_LAYER);
+      glass.push(mesh);
+    });
+    const over: THREE.Object3D[] = [...glass];
+    if (this.sectionBox.visible) this.sectionBox.root.traverse((obj) => over.push(obj));
+    const autoClear = this.renderer.autoClear;
+    this.renderer.autoClear = false;
+    if (rect) {
+      const pad = 2;
+      const x = ((rect.min.x + 1) / 2) * this.width - pad;
+      const y = ((rect.min.y + 1) / 2) * this.height - pad;
+      this.renderer.setScissor(x, y, ((rect.max.x - rect.min.x) / 2) * this.width + 2 * pad, ((rect.max.y - rect.min.y) / 2) * this.height + 2 * pad);
+      this.renderer.setScissorTest(true);
+    }
+    this.renderer.clearStencil();
+    const restore = stencilled(redrawn, THREE.AlwaysStencilFunc, THREE.ReplaceStencilOp);
+    cam.layers.set(REDRAW_LAYER);
+    this.renderer.render(this.scene, cam);
+    restore();
+    if (over.length > 0) {
+      const restoreOver = stencilled(over, THREE.EqualStencilFunc, THREE.KeepStencilOp);
+      cam.layers.set(OVER_REDRAW_LAYER);
+      this.renderer.render(this.scene, cam);
+      restoreOver();
+      for (const mesh of glass) mesh.layers.disable(OVER_REDRAW_LAYER);
+    }
+    this.renderer.setScissorTest(false);
+    cam.layers.set(0);
+    this.renderer.autoClear = autoClear;
+    this.redraws.clear();
+    release();
+    this.drawnHover = this.hover;
+    return true;
+  }
+
+  /** Where the boxes of `entities` lie on screen (NDC); null where one reaches behind the eye. */
+  private screenRect(entities: number[]): THREE.Box2 | null {
+    const cam = this.rig.camera;
+    const rect = new THREE.Box2();
+    const v = new THREE.Vector3();
+    for (const e of entities) {
+      const box = this.model?.entityBoxes.get(e);
+      if (!box) return null;
+      for (const c of boxCorners(box)) {
+        v.copy(c).project(cam);
+        if (!(v.z >= -1 && v.z <= 1)) return null;
+        rect.expandByPoint(new THREE.Vector2(v.x, v.y));
+      }
+    }
+    rect.intersect(new THREE.Box2(new THREE.Vector2(-1, -1), new THREE.Vector2(1, 1)));
+    return rect.isEmpty() ? null : rect;
+  }
+
+  /**
+   * Find out whether the drawing buffer keeps depth from one frame to the
+   * next (`preserveDrawingBuffer` says so; the hover redraw relies on it): a
+   * quad drawn the frame before must hide a farther one drawn now. True
+   * while the check draws this frame.
+   */
+  private checkPreserved(): boolean {
+    if (this.preserved === 'unknown') {
+      const scene = new THREE.Scene();
+      const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
+      camera.position.z = 1;
+      camera.updateMatrixWorld();
+      const plane = new THREE.PlaneGeometry(2, 2);
+      const near = new THREE.Mesh(plane, new THREE.MeshBasicMaterial({ color: 0xff0000 }));
+      const far = new THREE.Mesh(plane, new THREE.MeshBasicMaterial({ color: 0x00ff00 }));
+      far.position.z = -0.5;
+      far.updateMatrixWorld();
+      far.visible = false;
+      scene.add(near, far);
+      const dispose = () => {
+        plane.dispose();
+        (near.material as THREE.Material).dispose();
+        (far.material as THREE.Material).dispose();
+      };
+      this.probe = { scene, camera, near, far, dispose };
+      this.renderer.render(scene, camera);
+      this.preserved = 'probing';
+      return true;
+    }
+    const probe = this.probe!;
+    probe.near.visible = false;
+    probe.far.visible = true;
+    const autoClear = this.renderer.autoClear;
+    this.renderer.autoClear = false;
+    this.renderer.render(probe.scene, probe.camera);
+    this.renderer.autoClear = autoClear;
+    const gl = this.renderer.getContext();
+    const pixel = new Uint8Array(4);
+    gl.readPixels(gl.drawingBufferWidth >> 1, gl.drawingBufferHeight >> 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+    this.preserved = pixel[0]! > 200 && pixel[1]! < 50 ? 'yes' : 'no';
+    probe.dispose();
+    this.probe = null;
+    this.dirty = true;
+    return false;
+  }
 
   /** What is on screen changed: tell `onViewSettled` once it stays. */
   private viewChanged(): void {
@@ -784,6 +993,12 @@ export class Viewer {
     this.height = h;
     this.renderer.setSize(w, h, false);
     this.rig.setAspect(w / h);
+    // A new drawing buffer between the two frames of the check: check again.
+    if (this.preserved === 'probing') {
+      this.probe?.dispose();
+      this.probe = null;
+      this.preserved = 'unknown';
+    }
     this.requestRender();
   }
 
@@ -1243,4 +1458,42 @@ export class Viewer {
     this.overlay.remove();
     this.viewCube.canvas.remove();
   }
+}
+
+/** The part of `camera`'s frustum that `rect` (NDC) of the screen shows. */
+function regionFrustum(camera: THREE.Camera, rect: THREE.Box2): THREE.Frustum {
+  const sx = 2 / Math.max(rect.max.x - rect.min.x, 1e-6);
+  const sy = 2 / Math.max(rect.max.y - rect.min.y, 1e-6);
+  const cx = (rect.min.x + rect.max.x) / 2;
+  const cy = (rect.min.y + rect.max.y) / 2;
+  const crop = new THREE.Matrix4().set(sx, 0, 0, -sx * cx, 0, sy, 0, -sy * cy, 0, 0, 1, 0, 0, 0, 0, 1);
+  return new THREE.Frustum().setFromProjectionMatrix(crop.multiply(camera.projectionMatrix).multiply(camera.matrixWorldInverse));
+}
+
+/**
+ * Draw `objects` with the stencil test set (reference 1) until the returned
+ * function puts their materials back as they were.
+ */
+function stencilled(objects: THREE.Object3D[], func: THREE.StencilFunc, zPass: THREE.StencilOp): () => void {
+  const saved = new Map<THREE.Material, [boolean, THREE.StencilFunc, number, THREE.StencilOp]>();
+  for (const obj of objects) {
+    const material = (obj as THREE.Mesh).material;
+    if (!material) continue;
+    for (const m of Array.isArray(material) ? material : [material]) {
+      if (saved.has(m)) continue;
+      saved.set(m, [m.stencilWrite, m.stencilFunc, m.stencilRef, m.stencilZPass]);
+      m.stencilWrite = true;
+      m.stencilFunc = func;
+      m.stencilRef = 1;
+      m.stencilZPass = zPass;
+    }
+  }
+  return () => {
+    for (const [m, [write, f, ref, op]] of saved) {
+      m.stencilWrite = write;
+      m.stencilFunc = f;
+      m.stencilRef = ref;
+      m.stencilZPass = op;
+    }
+  };
 }

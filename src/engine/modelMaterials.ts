@@ -11,6 +11,9 @@ import { STATE_TEXTURE_WIDTH } from './EntityState';
 
 export type VisualStyle = 'wireframe' | 'hiddenLine' | 'shaded' | 'consistentColors';
 
+/** The three.js layer of the model's edge lines, so that a frame can be drawn without them. */
+export const EDGE_LAYER = 1;
+
 const STYLE_CODE: Record<VisualStyle, number> = {
   shaded: 0,
   hiddenLine: 1,
@@ -189,6 +192,16 @@ export function passVisible(material: THREE.Material, overrides: boolean): boole
   if (rvtPass === undefined || rvtBaseAlpha === undefined) return true;
   const transparent = rvtBaseAlpha < 0.999;
   return rvtPass === 0 ? !transparent : transparent || overrides;
+}
+
+/**
+ * Whether `material` is a transparent pass that blends something, without
+ * opacity overrides: of a material below full opacity (at full opacity it
+ * draws nothing) and above none (an opacity of 0 blends nothing).
+ */
+export function blendedPass(material: THREE.Material): boolean {
+  const { rvtPass, rvtBaseAlpha } = material.userData as { rvtPass?: 0 | 1; rvtBaseAlpha?: number };
+  return rvtPass === 1 && rvtBaseAlpha !== undefined && rvtBaseAlpha > 0 && rvtBaseAlpha < 0.999;
 }
 
 export function createEdgeMaterial(shared: SharedUniforms, instanced = false): THREE.LineBasicMaterial {

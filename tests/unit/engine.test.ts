@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { frontHalf, splitRuns } from '../../src/engine/ModelMesh';
-import { createFaceMaterial, createSharedUniforms, passVisible } from '../../src/engine/modelMaterials';
+import { frontHalf, splitRuns, trianglesIn } from '../../src/engine/ModelMesh';
+import { blendedPass, createFaceMaterial, createSharedUniforms, passVisible } from '../../src/engine/modelMaterials';
 
 /** A two-sided face set as rvt-rs writes it: the triangles, then each reversed. */
 function twoSided(vertices: number[], triangles: number[][]): THREE.BufferGeometry {
@@ -33,6 +33,26 @@ describe('splitRuns', () => {
 
   it('leaves a body alone whose triangle count does not match its runs', () => {
     expect(splitRuns(positions, indices, [{ triangles: 3, color: null, opacity: 1 }])).toBeNull();
+  });
+});
+
+describe('trianglesIn', () => {
+  it("picks one entity's triangles out of a reordered merged index, renumbered", () => {
+    // Entity A on vertices 0–3, B on 4–6; the bounds tree has shuffled the triangles.
+    const index = new Uint32Array([4, 5, 6, 2, 3, 0, 0, 1, 2]);
+    expect(Array.from(trianglesIn(index, 0, 4))).toEqual([2, 3, 0, 0, 1, 2]);
+    expect(Array.from(trianglesIn(index, 4, 3))).toEqual([0, 1, 2]);
+  });
+});
+
+describe('blendedPass', () => {
+  it('tells the transparent passes that blend something', () => {
+    const uniforms = createSharedUniforms();
+    const grey = new THREE.Color(0x808080);
+    expect(blendedPass(createFaceMaterial(uniforms, grey, 0.4, 1))).toBe(true);
+    expect(blendedPass(createFaceMaterial(uniforms, grey, 0.4, 0))).toBe(false);
+    expect(blendedPass(createFaceMaterial(uniforms, grey, 1, 1))).toBe(false);
+    expect(blendedPass(createFaceMaterial(uniforms, grey, 0, 1))).toBe(false);
   });
 });
 
