@@ -251,6 +251,52 @@ test.describe('with a sample model', () => {
     expect(errors).toEqual([]);
   });
 
+  test('Ctrl + drag orbits, Shift + drag pans, and a click with either still selects', async ({ page }) => {
+    test.setTimeout(300_000);
+    const errors = collectErrors(page);
+    await page.goto('./');
+    await openSample(page, SAMPLE!);
+    await expect(page.locator('.view-tab.active')).toContainText('3D ビュー', { timeout: 90_000 });
+    await expect(page.locator('.statusbar')).not.toHaveAttribute('data-saved-meshes', 'pending', { timeout: 180_000 });
+    const canvas = page.locator('.viewer-canvas');
+    const box = (await canvas.boundingBox())!;
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    const drag = async (key: 'Control' | 'Shift', kind: 'orbit' | 'pan') => {
+      await page.mouse.move(5, 5);
+      await page.waitForTimeout(300);
+      const before = await canvas.screenshot();
+      await page.mouse.move(cx, cy);
+      await page.keyboard.down(key);
+      await page.mouse.down();
+      await page.mouse.move(cx + 120, cy + 40, { steps: 8 });
+      await expect(canvas).toHaveAttribute('data-dragging', kind);
+      await page.mouse.up();
+      await page.keyboard.up(key);
+      await expect(canvas).not.toHaveAttribute('data-dragging', kind);
+      await page.mouse.move(5, 5);
+      await page.waitForTimeout(500);
+      expect(pixelDifference(before, await canvas.screenshot()), `${key} + drag moves the view`).toBeGreaterThan(0.01);
+    };
+    await drag('Control', 'orbit');
+    await drag('Shift', 'pan');
+    // Neither drag selected, nor opened the context menu (macOS asks for it on Ctrl + press).
+    await expect(page.locator('.status-filter')).toContainText(':0');
+    await expect(page.getByRole('menu')).toHaveCount(0);
+
+    const { x, y } = await findElementPoint(page, box);
+    await page.keyboard.down('Control');
+    await page.mouse.click(x, y);
+    await page.keyboard.up('Control');
+    await expect(page.locator('.status-filter')).toContainText(':1');
+    await expect(page.getByRole('menu')).toHaveCount(0);
+    await page.keyboard.down('Shift');
+    await page.mouse.click(x, y);
+    await page.keyboard.up('Shift');
+    await expect(page.locator('.status-filter')).toContainText(':0');
+    expect(errors).toEqual([]);
+  });
+
   test('floor plans are not crushed to black by the cut fill', async ({ page }) => {
     test.setTimeout(300_000);
     await page.goto('./');

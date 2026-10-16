@@ -6,7 +6,8 @@
  * Mouse (Revit):  wheel = zoom at cursor, middle drag = pan,
  *                 Shift + middle drag = orbit, middle double-click = zoom to fit,
  *                 left click = select (Ctrl add, Shift remove),
- *                 left drag → right = window selection, ← left = crossing selection.
+ *                 left drag → right = window selection, ← left = crossing selection,
+ *                 Ctrl + left drag = orbit (pan in 2D views), Shift + left drag = pan.
  * Touch:          one finger = orbit (pan in 2D views), two fingers = pan + pinch zoom.
  */
 
@@ -98,6 +99,8 @@ type Drag =
   | { kind: 'pan'; id: number; x: number; y: number }
   | { kind: 'orbit'; id: number; x: number; y: number; pivot: THREE.Vector3 }
   | { kind: 'select'; id: number; x0: number; y0: number; x: number; y: number; moved: boolean; mode: SelectEvent['mode'] }
+  /** Ctrl or Shift held on a left press: a drag navigates, a click selects. */
+  | { kind: 'modifier'; id: number; x0: number; y0: number; nav: 'pan' | 'orbit'; mode: SelectEvent['mode'] }
   | { kind: 'zoomRegion'; id: number; x0: number; y0: number; x: number; y: number }
   | { kind: 'grip'; id: number; face: number; x: number; y: number };
 
@@ -1187,6 +1190,18 @@ export class Viewer {
       el.setPointerCapture(ev.pointerId);
       return;
     }
+    if (ev.ctrlKey || ev.shiftKey) {
+      this.drag = {
+        kind: 'modifier',
+        id: ev.pointerId,
+        x0: ev.clientX,
+        y0: ev.clientY,
+        nav: ev.ctrlKey && this.rig.orbitEnabled ? 'orbit' : 'pan',
+        mode: this.selectMode(ev),
+      };
+      el.setPointerCapture(ev.pointerId);
+      return;
+    }
     this.drag = {
       kind: 'select',
       id: ev.pointerId,
@@ -1200,16 +1215,17 @@ export class Viewer {
     el.setPointerCapture(ev.pointerId);
   };
 
-  private startNavDrag(ev: PointerEvent, kind: 'pan' | 'orbit'): void {
+  /** A pan or orbit drag from `from` (where the button went down; the event's point by default). */
+  private startNavDrag(ev: PointerEvent, kind: 'pan' | 'orbit', from = { x: ev.clientX, y: ev.clientY }): void {
     this.renderer.domElement.setPointerCapture(ev.pointerId);
     this.setHover(null);
     this.callbacks.onHover(null, ev.clientX, ev.clientY);
     if (kind === 'orbit') {
-      const pivot = this.orbitPivot({ x: ev.clientX, y: ev.clientY });
-      this.drag = { kind: 'orbit', id: ev.pointerId, x: ev.clientX, y: ev.clientY, pivot };
+      const pivot = this.orbitPivot(from);
+      this.drag = { kind: 'orbit', id: ev.pointerId, x: from.x, y: from.y, pivot };
       this.showPivot(pivot);
     } else {
-      this.drag = { kind: 'pan', id: ev.pointerId, x: ev.clientX, y: ev.clientY };
+      this.drag = { kind: 'pan', id: ev.pointerId, x: from.x, y: from.y };
     }
     this.renderer.domElement.dataset.dragging = kind;
   }
@@ -1252,6 +1268,13 @@ export class Viewer {
           this.setHover(null);
         }
         if (drag.moved) this.drawRect(drag.x0, drag.y0, drag.x, drag.y, drag.x < drag.x0);
+        break;
+      }
+      case 'modifier': {
+        if (Math.hypot(ev.clientX - drag.x0, ev.clientY - drag.y0) <= CLICK_SLOP) break;
+        // From the press, so that the slop moves the view too.
+        this.startNavDrag(ev, drag.nav, { x: drag.x0, y: drag.y0 });
+        this.onPointerMove(ev);
         break;
       }
       case 'zoomRegion': {
@@ -1306,6 +1329,11 @@ export class Viewer {
           const entities = this.entitiesInRect(drag.x0, drag.y0, drag.x, drag.y, crossing);
           this.callbacks.onBoxSelect({ entities, mode: drag.mode });
         }
+        break;
+      }
+      case 'modifier': {
+        const hit = this.pick(ev.clientX, ev.clientY);
+        this.callbacks.onSelect({ entity: hit?.entity ?? null, mode: drag.mode });
         break;
       }
       case 'zoomRegion': {
@@ -1368,6 +1396,8 @@ export class Viewer {
 
   private onContextMenu = (ev: MouseEvent): void => {
     ev.preventDefault();
+    // During a drag: on macOS a Ctrl + left press asks for the menu too.
+    if (this.drag) return;
     if (this.navMode !== 'select') {
       this.setNavMode('select');
       return;
